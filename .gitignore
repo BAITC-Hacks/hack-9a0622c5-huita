@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+work/
+submission.csv
+submission.seed42.reference.csv
+feature_dictionary.csv
+tariff_dictionary.csv
+data/arpu_monthly.csv
+data/traffic.csv
