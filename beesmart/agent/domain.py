@@ -96,7 +96,11 @@ def load_domain(env, history_path: Path, policy_path: Path) -> Domain:
     missing = set(REQUIRED) - set(env.customer_profile.columns)
     if missing:
         raise ValueError(f"Missing profile columns: {sorted(missing)}")
-    profile = env.customer_profile.copy().sort_values("ID_NUMBER", kind="stable").reset_index(drop=True)
+    # Keep the agent's independent snapshot narrow. Uploaded profiles may have
+    # 128 columns, but segment construction and validation use only these six;
+    # copying/sorting unused payload columns retains unnecessary working data.
+    # The original public profile remains intact for the official scorer.
+    profile = env.customer_profile.loc[:, list(REQUIRED)].copy().sort_values("ID_NUMBER", kind="stable").reset_index(drop=True)
     if profile["ID_NUMBER"].isna().any() or profile["ID_NUMBER"].duplicated().any():
         raise ValueError("Profile must have unique nonempty IDs")
     tariffs = tuple(sorted(str(v) for v in env.tariffs["tariff_plan_code"].dropna().unique()))

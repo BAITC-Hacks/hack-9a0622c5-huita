@@ -249,6 +249,7 @@ async function poll() {
 function acceptRun(run) {
   const previousStatus = state.run?.status;
   const previousId = state.run?.id;
+  const previousFallback = state.run?.llm?.fallback_used;
   state.run = run;
   if (previousId !== run?.id) {
     state.eventSignature = '';
@@ -262,6 +263,8 @@ function acceptRun(run) {
     notice('Расчёт остановлен', run.error || 'Сервер не смог завершить расчёт. Проверьте отчёт и входные данные.');
   } else if (run?.status === 'completed' && run.error) {
     notice('Расчёт завершён с предупреждением', run.error, 'warning');
+  } else if (run?.llm?.fallback_used && (!previousFallback || previousId !== run.id)) {
+    notice('Используется локальная политика', run.llm.fallback_reason || 'Планирование OpenAI не завершилось. Агент продолжил расчёт локально.', 'warning');
   }
   if (run?.status === 'completed' && previousId === run.id && ['queued', 'running'].includes(previousStatus) && state.notifiedRun !== run.id) {
     state.notifiedRun = run.id;
@@ -337,10 +340,13 @@ function renderLLM() {
     return;
   }
   const labels = { pending: 'Подготовка ИИ-планирования', planning: 'Модель составляет очередь пилотов', cached: 'План ИИ из кэша', completed: 'Обоснование гипотез от ИИ', failed: 'Этап ИИ не завершён' };
-  $('llm-title').textContent = labels[llm.status] || 'Планирование ИИ';
+  $('llm-title').textContent = llm.fallback_used ? 'Расчёт по локальной политике' : labels[llm.status] || 'Планирование ИИ';
   // The model rationale is untrusted prose, never HTML or a measured result.
-  $('llm-summary').textContent = typeof llm.summary === 'string' && llm.summary ? llm.summary : llm.status === 'failed' ? 'Причина указана в сообщении об ошибке расчёта.' : 'Ожидаем подготовку гипотез.';
+  $('llm-summary').textContent = llm.fallback_used
+    ? `${llm.fallback_reason || 'Планирование OpenAI не завершилось.'} Агент использует локальную очередь гипотез и проверяет её пилотами.`
+    : typeof llm.summary === 'string' && llm.summary ? llm.summary : llm.status === 'failed' ? 'Причина указана в сообщении об ошибке расчёта.' : 'Ожидаем подготовку гипотез.';
   const parts = [];
+  if (llm.fallback_used) parts.push('Этап OpenAI не завершён', `Причина: ${safeText(llm.error_code)}`);
   if (['completed', 'cached'].includes(llm.status)) parts.push(`${num(llm.hypotheses)} гипотез`, 'Обоснование, не измеренный эффект');
   if (llm.cache_hit) parts.push('Без нового запроса');
   if (typeof llm.estimated_cost_usd === 'number') parts.push(`Оценка расхода: ${usdFormat.format(llm.estimated_cost_usd)} USD`);
@@ -461,6 +467,7 @@ function describeEvent(event) {
   switch (event.event) {
     case 'agent_planning': return { title: 'ИИ готовит гипотезы', description: `Модель ${safeText(d.model)} анализирует агрегаты аудитории.`, meta: 'Измеренные эффекты будут получены на пилотах', icon: 'spark' };
     case 'agent_policy_ready': return { title: 'Очередь гипотез готова', description: `${num(d.hypotheses)} гипотез переданы Python-агенту`, meta: d.cache_hit ? 'Использована сохранённая политика' : 'Модель подготовила новую политику', icon: 'check' };
+    case 'agent_fallback': return { title: 'Переход на локальную политику', description: safeText(d.reason), meta: `Этап OpenAI: ${safeText(d.error_code)} · пилоты продолжены локально`, icon: 'info' };
     case 'pilot_result': return { title: `Пилот ${safeText(d.pilot_number)} · ${channelNames[d.channel] || safeText(d.channel)}`, description: `${safeText(d.current_tariff)} / ${safeText(d.arpu_segment)} → ${safeText(d.target_tariff)}`, meta: `${num(d.n_customers)} абонентов · ${num(d.cost)} у.е. · наблюдение для канала ${pct(typeof d.observed_lift_ratio === 'number' ? d.observed_lift_ratio * 100 : null)} · нижняя граница базового эффекта ${pct(typeof d.lower === 'number' ? d.lower * 100 : null)}`, icon: 'target' };
     case 'run_start': return { title: 'Аудитория изучена', description: `${num(d.profile_size)} абонентов · ${num(d.queue_size)} гипотез в очереди`, meta: `Бюджет ${num(d.budget)} у.е. · ${num(d.contacts)} контактов`, icon: 'users' };
     case 'arm_selected': return { title: 'Выбрана гипотеза', description: Array.isArray(d.arm) ? d.arm.map(safeText).join(' → ') : 'Гипотеза передана на проверку', meta: `${num(d.requested_n)} контактов · ${channelNames[d.channel] || safeText(d.channel)} · ${d.reason === 'confirmation' ? 'уточнение оценки' : 'первая проверка'}`, icon: 'spark' };

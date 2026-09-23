@@ -59,6 +59,8 @@ def main() -> int:
             "id": record["id"], "status": record["status"], "seed": record["seed"],
             "provider": record["llm"]["provider"], "model": record["llm"]["model"],
             "llm_status": record["llm"]["status"], "cache_hit": record["llm"]["cache_hit"],
+            "fallback_used": record["llm"].get("fallback_used", False),
+            "fallback_reason": record["llm"].get("fallback_reason"),
             "pilots": metrics.get("n_pilots", 0), "campaigns": len(record["campaigns"]),
             "net_arpu_gain": metrics.get("net_arpu_gain"), "error": record["error"],
             "report": str(settings.storage_path / "runs" / f"{record['id']}.json"),

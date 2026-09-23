@@ -117,3 +117,23 @@ def test_frozen_priorities_influence_search_but_preserve_coverage_uniqueness_and
     assert len(loaded.queue) == len(set(loaded.queue)) == 14
     assert all(loaded.cells[arm[:2]].n >= 10 and arm[2] in loaded.tariffs and arm[0] != arm[2]
                for arm in loaded.queue)
+
+
+def test_full_segment_limit_keeps_5000_and_rejects_5001_even_in_indexed_validation(tmp_path):
+    env = environment()
+    env.customer_profile = pd.DataFrame({
+        "ID_NUMBER": range(10001), "current_tariff": "tariff_1",
+        "arpu_segment": ["LOW"] * 5000 + ["MID"] * 5001,
+        "data_segment": "HEAVY", "call_segment": "LOW", "predicted_arpu": 700.0,
+    })
+    loaded = load_domain(env, tmp_path / "no-history", tmp_path / "no-policy")
+    assert len(loaded.segments) == 1
+    assert loaded.segments[0].n == 5000
+    planner = Planner(loaded)
+    campaign = {"filter_current_tariff": "tariff_1", "filter_arpu_segment": "LOW",
+                "target_tariff": "tariff_2", "channel": "push"}
+    assert planner.validate([campaign], 100000, 15000)["ok"]
+    oversized = planner.validate([{**campaign, "filter_arpu_segment": "MID"}], 100000, 15000)
+    assert not oversized["ok"]
+    assert oversized["final_contacts"] == 5001
+    assert "campaign_1:segment_size" in oversized["errors"]

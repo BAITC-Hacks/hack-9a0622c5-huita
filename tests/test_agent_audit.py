@@ -125,3 +125,24 @@ def test_llm_candidate_cap_keeps_rare_arpu_classes(tmp_path, synthetic_frames):
     assert {arm[1] for arm in context.candidates.values()} == {"LOW", "MID", "HIGH"}
     assert len(set(context.candidates.values())) == len(context.candidates)
     assert all(arm[0] != arm[2] for arm in context.candidates.values())
+
+
+def test_observed_cell_larger_than_remaining_contacts_uses_unobserved_fallback(tmp_path):
+    # The measured cell was initially addressable, but its whole final segment
+    # no longer fits after the pilot. A one-person unmeasured cell still fits.
+    profile = pd.DataFrame({"ID_NUMBER": range(13), "current_tariff": "tariff_a",
+                            "arpu_segment": ["MID"] * 12 + ["LOW"], "data_segment": "HEAVY",
+                            "call_segment": "LOW", "predicted_arpu": 3000.0})
+    env = make_test_environment(profile)
+    env.remaining_contacts = 20
+    agent = Agent(history_path=tmp_path / "no-history", policy_path=tmp_path / "no-policy")
+    campaigns = agent.act(env)
+    assert agent.diagnostics["n_pilots"] == 1
+    assert agent.diagnostics["pilot_contacts"] == 12
+    assert len(campaigns) == 1
+    assert campaigns[0]["filter_arpu_segment"] == "LOW"
+    assert campaigns[0]["channel"] == "push"
+    assert agent.diagnostics["validation"]["ok"]
+    assert agent.diagnostics["final_contacts"] == 1
+    assert agent.diagnostics["pilot_contacts"] + agent.diagnostics["final_contacts"] <= 20
+    assert "no_feasible_final_plan" not in agent.diagnostics["flags"]

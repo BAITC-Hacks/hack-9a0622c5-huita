@@ -170,3 +170,24 @@ def test_missing_optional_categories_stay_in_parent_audience(tmp_path):
     parent = next(s for s in domain.segments if s.key == ("tariff_a", "LOW", "", ""))
     assert parent.n == 12
     assert parent.arpu_sum == pytest.approx(env.customer_profile[env.customer_profile.arpu_segment == "LOW"].predicted_arpu.sum())
+
+
+def test_unused_profile_columns_do_not_change_decisions_or_mutate_public_data(tmp_path):
+    narrow, _ = synthetic_env(n_per_cell=60)
+    wide, _ = synthetic_env(n_per_cell=60)
+    # Uploads allow 128 columns. Irrelevant numeric and text payloads must stay
+    # available to the environment without entering the agent's working copy.
+    extras = pd.DataFrame({f"unused_{index}": "metadata" if index % 2 else index
+                           for index in range(122)}, index=wide.customer_profile.index)
+    wide.customer_profile = pd.concat([wide.customer_profile, extras], axis=1)
+    before = wide.customer_profile.copy(deep=True)
+    first, second = make_agent(tmp_path), make_agent(tmp_path)
+    assert first.act(narrow) == second.act(wide)
+    first_diagnostics = {k: v for k, v in first.diagnostics.items() if k != "duration_seconds"}
+    second_diagnostics = {k: v for k, v in second.diagnostics.items() if k != "duration_seconds"}
+    assert first_diagnostics == second_diagnostics
+    pd.testing.assert_frame_equal(wide.customer_profile, before)
+    snapshot = load_domain(wide, tmp_path / "no-history", tmp_path / "no-policy").profile
+    assert set(snapshot.columns) == set(narrow.customer_profile.columns)
+    snapshot.loc[0, "predicted_arpu"] = 0.0
+    pd.testing.assert_frame_equal(wide.customer_profile, before)

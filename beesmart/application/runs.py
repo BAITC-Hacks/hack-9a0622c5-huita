@@ -161,6 +161,7 @@ class RunManager:
 
     async def _execute(self, record: dict) -> None:
         started = time.perf_counter()
+        deadline = asyncio.get_running_loop().time() + self.settings.run_timeout_seconds
         record["status"] = "running"
         process = None
         try:
@@ -171,25 +172,29 @@ class RunManager:
             data_path = self.settings.data_path
             if record["dataset"]["source"] == "uploaded":
                 data_path = self.settings.storage_path / "datasets" / UUID(record["dataset"]["id"]).hex
-            if self.settings.agent_provider == "openai":
-                record["events"].append({"event": "agent_planning", "data": {
-                    "provider": "openai", "model": self.settings.openai_model}})
-            async with asyncio.timeout(self.settings.run_timeout_seconds):
-                policy_path = await self.intelligence.prepare(data_path, record["llm"])
-            if self.settings.agent_provider == "openai":
-                record["events"].append({"event": "agent_policy_ready", "data": {
-                    "cache_hit": record["llm"]["cache_hit"], "hypotheses": record["llm"]["hypotheses"]}})
-            arguments = [sys.executable, "-m", "beesmart.application.worker", str(record["seed"]),
-                         "--data-dir", str(data_path), "--policy-path", str(policy_path)]
-            process = await asyncio.create_subprocess_exec(
-                *arguments,
-                cwd=self.settings.root, env=environment,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-                limit=1_048_576,
-            )
-            self._process = process
-            result = None
-            async with asyncio.timeout(max(0.001, self.settings.run_timeout_seconds - (time.perf_counter() - started))):
+            async with asyncio.timeout_at(deadline):
+                policy_path = await self._prepare_policy(data_path, record)
+                # File transactions finish before cancellation propagates. A
+                # stalled filesystem can therefore exhaust the whole deadline.
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise TimeoutError
+                arguments = [sys.executable, "-m", "beesmart.application.worker", str(record["seed"]),
+                             "--data-dir", str(data_path), "--policy-path", str(policy_path)]
+                spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+                    *arguments,
+                    cwd=self.settings.root, env=environment,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+                    limit=1_048_576,
+                ))
+                try:
+                    process = await asyncio.shield(spawning)
+                except asyncio.CancelledError:
+                    # A child created concurrently with cancellation still
+                    # belongs to this run and must be killed and reaped below.
+                    process = await self._finish_persistence(spawning)
+                    raise
+                self._process = process
+                result = None
                 while line := await process.stdout.readline():
                     message = json.loads(line)
                     if message.get("type") == "event" and len(record["events"]) < self.settings.max_events:
@@ -218,16 +223,40 @@ class RunManager:
             if record["status"] == "failed" and record["llm"]["status"] in ("pending", "planning"):
                 record["llm"].update(status="failed", error_code="interrupted")
             if process is not None and process.returncode is None:
-                process.kill()
-                await process.wait()
+                with suppress(ProcessLookupError):
+                    process.kill()
+                await self._finish_persistence(asyncio.create_task(process.wait()))
             self._process = None
             record["finished_at"] = timestamp()
             record["duration_seconds"] = round(time.perf_counter() - started, 3)
             try:
-                await asyncio.to_thread(self._save_report, deepcopy(record))
+                await self._finish_persistence(asyncio.create_task(
+                    asyncio.to_thread(self._save_report, deepcopy(record))))
             except OSError:
                 logging.getLogger(__name__).error("Run report could not be persisted; check storage availability")
                 record["error"] = "Результат рассчитан, но отчёт не сохранён. Скачайте его до перезапуска сервера."
+
+    async def _prepare_policy(self, data_path, record: dict):
+        if self.settings.agent_provider == "local":
+            return await self.intelligence.prepare(data_path, record["llm"])
+        record["events"].append({"event": "agent_planning", "data": {
+            "provider": "openai", "model": self.settings.openai_model}})
+        try:
+            async with asyncio.timeout(self.settings.planning_timeout_seconds):
+                policy = await self.intelligence.prepare(data_path, record["llm"])
+        except (LLMError, TimeoutError) as exc:
+            # CancelledError deliberately propagates: shutting down the server
+            # must never create a new local worker or a second paid request.
+            code = exc.code if isinstance(exc, LLMError) else "planning_timeout"
+            reason = str(exc) if isinstance(exc, LLMError) else "Превышен лимит времени подготовки гипотез OpenAI."
+            record["llm"].update(status="failed", error_code=code,
+                                 fallback_used=True, fallback_reason=reason)
+            record["events"].append({"event": "agent_fallback", "data": {
+                "error_code": code, "reason": reason, "policy_source": "local"}})
+            return self.settings.root / "policies/frozen_policy.json"
+        record["events"].append({"event": "agent_policy_ready", "data": {
+            "cache_hit": record["llm"]["cache_hit"], "hypotheses": record["llm"]["hypotheses"]}})
+        return policy
 
     def _save_report(self, record: dict) -> None:
         folder = self.settings.storage_path / "runs"

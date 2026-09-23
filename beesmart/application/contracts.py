@@ -56,6 +56,8 @@ class LLMRunInfo(ApiResponse):
     summary: str = Field(max_length=1000, description="Untrusted model text; render with textContent, never innerHTML. Hypothesis rationale, not a measured result.")
     hypotheses: int = Field(ge=0, le=14)
     error_code: str | None
+    fallback_used: bool = Field(default=False, description="The run continued with the local frozen policy after LLM planning failed.")
+    fallback_reason: str | None = Field(default=None, description="Safe explanation of the LLM fallback; token usage and reservations remain recorded.")
 
 
 class DatasetRef(ApiResponse):

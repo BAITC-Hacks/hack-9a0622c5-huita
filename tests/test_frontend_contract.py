@@ -178,6 +178,26 @@ def test_refresh_cancels_reads_but_preserves_download_and_post(javascript):
     assert result == {"aborted": [True, False, False], "read": {"aborted": True}, "download": "downloaded-blob", "post": {"id": "run-1"}, "marker": "1", "timers": 0}
 
 
+def test_local_fallback_is_visible_without_claiming_llm_success(javascript):
+    result = javascript(DOM_DOUBLES + APP_FUNCTIONS + """
+        state.run = { status: 'completed', llm: { provider: 'openai', status: 'failed',
+            fallback_used: true, fallback_reason: '<img src=x> Request timed out',
+            error_code: 'planning_timeout', summary: 'Unused model rationale',
+            input_tokens: 2000, hypotheses: 3, estimated_cost_usd: .001, reserved_usd: .02 } };
+        renderLLM();
+        const event = describeEvent({ event: 'agent_fallback', data: {
+            reason: 'Request timed out', error_code: 'planning_timeout' } });
+        return { title: $('llm-title').textContent, summary: $('llm-summary').textContent,
+            usage: $('llm-usage').textContent, hidden: $('llm-details').hidden, event };
+    """)
+    assert result["title"] == "Расчёт по локальной политике" and not result["hidden"]
+    assert "<img src=x>" in result["summary"]  # Rendered as text, not HTML.
+    assert "Unused model rationale" not in result["summary"]
+    assert "planning_timeout" in result["usage"] and "Резерв:" in result["usage"]
+    assert "Оценка расхода:" in result["usage"] and "3 гипотез" not in result["usage"]
+    assert result["event"]["title"] == "Переход на локальную политику"
+
+
 def test_token_switch_discards_already_started_download_body(javascript):
     result = javascript("""
         const body = deferred();

@@ -54,7 +54,8 @@ class Settings:
         if self.openai_api_key and (not self.openai_api_key.isascii() or
                 any(not 33 <= ord(c) <= 126 for c in self.openai_api_key)):
             raise ValueError("OPENAI_API_KEY contains invalid characters")
-        if self.run_timeout_seconds <= 0 or self.retained_runs < 1 or self.max_events < 1:
+        if (not math.isfinite(self.run_timeout_seconds) or self.run_timeout_seconds <= 0
+                or self.retained_runs < 1 or self.max_events < 1):
             raise ValueError("Run timeout, retention, and event limits must be positive")
         if not self.allowed_hosts:
             raise ValueError("BEESMART_ALLOWED_HOSTS must list explicit hostnames")
@@ -82,6 +83,11 @@ class Settings:
                 raise ValueError("Production requires BEESMART_API_TOKEN with at least 32 non-whitespace ASCII characters")
             if self.allowed_hosts == LOCAL_HOSTS:
                 raise ValueError("Production requires an explicit BEESMART_ALLOWED_HOSTS setting")
+
+    @property
+    def planning_timeout_seconds(self) -> float:
+        """Reserve most of the shared run deadline for local pilots and scoring."""
+        return min(50.0, self.run_timeout_seconds * 0.2)
 
     @property
     def storage_path(self) -> Path:

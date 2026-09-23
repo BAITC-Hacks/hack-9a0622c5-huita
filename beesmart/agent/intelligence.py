@@ -111,7 +111,8 @@ class IntelligenceService:
                 "status": "pending" if self.settings.agent_provider == "openai" else "disabled",
                 "cache_hit": False, "input_tokens": 0, "output_tokens": 0,
                 "estimated_cost_usd": 0.0, "reserved_usd": 0.0,
-                "summary": "", "hypotheses": 0, "error_code": None}
+                "summary": "", "hypotheses": 0, "error_code": None,
+                "fallback_used": False, "fallback_reason": None}
 
     async def prepare(self, data_path: Path, metadata: dict) -> Path:
         self.check_ready()
@@ -162,9 +163,14 @@ class IntelligenceService:
                         hypotheses=len(response.policy["priority_arms"]))
         value = {**response.policy, "_llm": {"model": self.settings.openai_model,
                  "prompt_version": PROMPT_VERSION, "summary": response.summary}}
-        private_json(path, value)
-        for old in sorted(path.parent.glob("*.json"), key=lambda item: item.stat().st_mtime)[:-CACHE_ENTRIES]:
-            old.unlink(missing_ok=True)
+        try:
+            private_json(path, value)
+            for old in sorted(path.parent.glob("*.json"), key=lambda item: item.stat().st_mtime)[:-CACHE_ENTRIES]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            # The completed request is already charged; falling back must not
+            # reset either its usage or the durable ledger.
+            raise LLMError("policy_storage", "Не удалось сохранить политику OpenAI в приватном хранилище.") from None
 
     def _persist_ledger(self, value: dict) -> None:
         try:

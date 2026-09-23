@@ -532,6 +532,24 @@
             "title": "Estimated Cost Usd",
             "type": "number"
           },
+          "fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Safe explanation of the LLM fallback; token usage and reservations remain recorded.",
+            "title": "Fallback Reason"
+          },
+          "fallback_used": {
+            "default": false,
+            "description": "The run continued with the local frozen policy after LLM planning failed.",
+            "title": "Fallback Used",
+            "type": "boolean"
+          },
           "hypotheses": {
             "maximum": 14.0,
             "minimum": 0.0,
