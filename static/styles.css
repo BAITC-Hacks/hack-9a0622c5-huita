@@ -29,7 +29,7 @@ button:disabled { cursor: not-allowed; }
 button:disabled, .button:disabled { opacity: .45; box-shadow: none; transform: none; }
 a { color: inherit; text-decoration: none; }
 button, a, input, select { outline-offset: 4px; }
-:focus-visible { outline: 3px solid #c2a321; }
+:focus-visible { outline: 3px solid #8a6d0a; }
 ::selection { background: #ffe67c; color: var(--ink); }
 h1, h2, h3, h4, p { margin: 0; }
 h2 { font-size: 17px; letter-spacing: -.4px; font-weight: 650; }
@@ -328,7 +328,7 @@ select { max-width: 100%; min-height: 32px; padding: 5px 27px 5px 10px; border: 
 .notice.success { color: #659079; border-color: #d7e8df; background: #f5fbf7; }
 .notice .icon-button { width: 24px; height: 24px; margin-top: -3px; margin-right: -5px; color: inherit; }
 .notice-action { flex-shrink: 0; padding: 5px 8px; border: 1px solid currentColor; border-radius: 6px; background: transparent; color: inherit; font-size: 9px; }
-.form-error { margin: 12px 0; padding: 10px 12px; border: 1px solid #f1dfe2; border-radius: 8px; background: #fff6f7; color: #b26a71; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.form-error { margin: 12px 0; padding: 10px 12px; border: 1px solid #f1dfe2; border-radius: 8px; background: #fff6f7; color: #913f4a; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
 .dialog { width: min(480px, calc(100% - 32px)); max-height: calc(100dvh - 40px); overflow-y: auto; padding: 28px; border: 1px solid #e4e8eb; border-radius: 20px; background: #fff; color: var(--ink); box-shadow: 0 28px 90px #14212c26; }
 .dialog::backdrop { background: #18202c54; backdrop-filter: blur(5px); }
 .dialog-heading { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
@@ -707,3 +707,22 @@ input::placeholder { color: #737d87; }
 .llm-details > strong { display: block; font-size: 12px; color: #49452c; }
 .llm-details p { margin-top: 8px; font-size: 12px; line-height: 1.65; color: #626b70; overflow-wrap: anywhere; white-space: pre-line; }
 .llm-details small { display: block; margin-top: 9px; color: #707971; font-size: 11px; line-height: 1.6; }
+
+/* Keep the existing layout usable by keyboard and touch. */
+.search-field:focus-within { outline: 3px solid #8a6d0a; outline-offset: 3px; }
+.form-error-link { display: block; margin-top: 6px; color: inherit; text-decoration: underline; }
+.event-meta { display: block; max-width: none; margin-top: 4px; padding-left: 0; text-align: left; }
+.launch-row .button { min-width: 0; white-space: normal; }
+#start-label { min-width: 0; }
+
+@media (max-width: 700px) {
+  .seed-field input, .token-input, .search-field input, select, .activity-controls select { font-size: 16px; }
+  .nav-item, .topbar .icon-button, .connection-button, .remove-file,
+  .icon-button, .button, .button.compact, .download-actions .button,
+  .source-tab, .text-button, .notice-action, select, .activity-controls select { min-height: 44px; }
+  .nav-item, .topbar .icon-button, .remove-file, .icon-button { min-width: 44px; }
+  .remove-file { top: 0; right: 0; }
+  .file-card.is-selected .dropzone strong { padding-right: 27px; }
+  .file-card.is-selected .dropzone { padding-right: 24px; }
+  .activity-controls select { max-width: 117px; }
+}

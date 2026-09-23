@@ -20,6 +20,7 @@ def main() -> None:
     seed = args.seed
     # This path is supplied only by the server, never accepted from an HTTP request.
     dataset_root = args.data_dir.resolve()
+    policy_path = args.policy_path.resolve()
     protocol_stdout = sys.stdout
 
     def send(kind: str, data: dict) -> None:
@@ -41,7 +42,7 @@ def main() -> None:
             def __init__(self):
                 self.delegate = Agent(event_sink=event_sink,
                                       history_path=dataset_root / "data" / "change_tariff.csv",
-                                      policy_path=args.policy_path.resolve())
+                                      policy_path=policy_path)
                 self.campaigns = []
 
             def act(self, env):

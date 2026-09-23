@@ -13,11 +13,12 @@ const usdFormat = new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 6 });
 const state = {
   overview: null, run: null, connected: false, source: 'upload', files: {},
   refreshing: false, submitting: false, uncertain: false, cooldownUntil: 0,
-  pollTimer: null, pollBusy: false, pollPaused: false, revision: 0,
+  pollTimer: null, pollBusy: false, pollPaused: false, revision: 0, authRevision: 0,
   downloadBusy: new Set(), eventSignature: '', resultSignature: '', notifiedRun: null,
 };
 let cooldownTimer;
 let toastTimer;
+let invalidField;
 const num = value => typeof value === 'number' && Number.isFinite(value) ? numberFormat.format(value) : '—';
 const decimal = value => typeof value === 'number' && Number.isFinite(value) ? decimalFormat.format(value) : '—';
 const pct = value => `${decimal(value)}%`;
@@ -49,10 +50,26 @@ function notice(title, message, kind = 'error', action) {
   $('notice-action').onclick = action || null;
   updateControls();
 }
-function formError(message) {
+function formError(message, fieldId) {
+  if (invalidField) {
+    invalidField.removeAttribute('aria-invalid');
+    const descriptions = (invalidField.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== 'form-error');
+    if (descriptions.length) invalidField.setAttribute('aria-describedby', descriptions.join(' '));
+    else invalidField.removeAttribute('aria-describedby');
+    invalidField = null;
+  }
   $('form-error').textContent = message;
   $('form-error').hidden = !message;
-  if (message) $('form-error').focus({ preventScroll: true });
+  if (message && fieldId) {
+    invalidField = $(fieldId);
+    invalidField.setAttribute('aria-invalid', 'true');
+    invalidField.setAttribute('aria-describedby', `${invalidField.getAttribute('aria-describedby') || ''} form-error`.trim());
+    const link = node('button', 'text-button form-error-link', 'Проверить поле');
+    link.type = 'button';
+    link.addEventListener('click', () => $(fieldId).focus());
+    $('form-error').append(link);
+  }
+  if (message) $('form-error').focus();
 }
 function toast(message) {
   clearTimeout(toastTimer);
@@ -67,11 +84,40 @@ function setConnection(connected, label) {
   updateControls();
 }
 function stopPoll() { clearTimeout(state.pollTimer); state.pollTimer = null; }
+function clearPrivateView() {
+  // A different connection must never inherit a prior user's results or files.
+  state.revision += 1;
+  state.authRevision += 1;
+  api.cancelReadRequests({ includeDownloads: true });
+  stopPoll();
+  clearTimeout(cooldownTimer);
+  clearTimeout(toastTimer);
+  state.overview = null;
+  state.refreshing = false;
+  state.uncertain = false;
+  state.cooldownUntil = 0;
+  state.notifiedRun = null;
+  state.pollPaused = true;
+  $('toast').hidden = true;
+  $('toast').querySelector('span').textContent = '';
+  for (const id of ['limit-budget', 'limit-contacts', 'limit-pilots']) $(id).textContent = '—';
+  $('agent-engine').textContent = 'Подключитесь к серверу';
+  $('privacy-copy').textContent = 'Файлы отправляются вашему серверу BeeSmart';
+  $('bundled-title').textContent = 'Подключитесь к серверу';
+  $('bundled-description').textContent = 'Данные доступны после проверки доступа.';
+  $('bundled-files').replaceChildren();
+  $('campaign-search').value = '';
+  $('channel-filter').value = 'all';
+  setConnection(false);
+  acceptRun(null);
+}
 function handleError(error, title = 'Не удалось выполнить запрос') {
+  if (error.aborted) return;
   stopPoll();
   state.pollPaused = true;
   const message = error instanceof ApiError ? error.message : 'Неожиданная ошибка. Обновите состояние страницы.';
   if (error.status === 401) {
+    clearPrivateView();
     setConnection(false, 'Нужен доступ');
     notice('Нужен токен доступа', message, 'warning', () => $('connection-dialog').showModal());
     $('notice-action').textContent = 'Подключиться';
@@ -150,6 +196,7 @@ async function refresh() {
   state.cooldownUntil = 0;
   stopPoll();
   const revision = ++state.revision;
+  api.cancelReadRequests();
   state.refreshing = true;
   updateControls();
   try {
@@ -285,7 +332,10 @@ function renderAgent() {
 function renderLLM() {
   const llm = state.run?.llm;
   $('llm-details').hidden = llm?.provider !== 'openai';
-  if (llm?.provider !== 'openai') return;
+  if (llm?.provider !== 'openai') {
+    for (const id of ['llm-title', 'llm-summary', 'llm-usage']) $(id).textContent = '';
+    return;
+  }
   const labels = { pending: 'Подготовка ИИ-планирования', planning: 'Модель составляет очередь пилотов', cached: 'План ИИ из кэша', completed: 'Обоснование гипотез от ИИ', failed: 'Этап ИИ не завершён' };
   $('llm-title').textContent = labels[llm.status] || 'Планирование ИИ';
   // The model rationale is untrusted prose, never HTML or a measured result.
@@ -321,7 +371,7 @@ function renderResults(force = false) {
   $('result-status').className = `result-status ${run?.status === 'completed' ? metrics?.net_arpu_gain > 0 ? 'positive' : 'negative' : activeRun() ? 'is-active' : ''}`;
   $('metric-net').textContent = metrics ? signed(metrics.net_arpu_gain) : '—';
   $('metric-net').className = metrics ? metrics.net_arpu_gain > 0 ? 'positive' : 'negative' : '';
-  $('metric-net-note').textContent = metrics ? `у.е. · ${pct(metrics.growth_vs_baseline_pct)} к базовому ARPU` : 'Результат после всех расходов';
+  $('metric-net-note').textContent = metrics ? `у.е. · ${pct(metrics.growth_vs_baseline_pct)} к базовому ARPU` : 'После расходов на контакты';
   $('metric-cost').textContent = metrics ? num(metrics.total_cost) : '—';
   $('metric-cost-note').textContent = metrics ? `у.е. · ${pct(metrics.budget_used_pct)} бюджета` : 'Пилоты и финальный план';
   $('metric-audience').textContent = metrics ? num(metrics.unique_customers_targeted) : '—';
@@ -411,7 +461,7 @@ function describeEvent(event) {
   switch (event.event) {
     case 'agent_planning': return { title: 'ИИ готовит гипотезы', description: `Модель ${safeText(d.model)} анализирует агрегаты аудитории.`, meta: 'Измеренные эффекты будут получены на пилотах', icon: 'spark' };
     case 'agent_policy_ready': return { title: 'Очередь гипотез готова', description: `${num(d.hypotheses)} гипотез переданы Python-агенту`, meta: d.cache_hit ? 'Использована сохранённая политика' : 'Модель подготовила новую политику', icon: 'check' };
-    case 'pilot_result': return { title: `Пилот ${safeText(d.pilot_number)} · ${channelNames[d.channel] || safeText(d.channel)}`, description: `${safeText(d.current_tariff)} / ${safeText(d.arpu_segment)} → ${safeText(d.target_tariff)}`, meta: `${num(d.n_customers)} абонентов · ${num(d.cost)} у.е. · наблюдение ${pct(typeof d.observed_lift_ratio === 'number' ? d.observed_lift_ratio * 100 : null)} · нижняя оценка ${pct(typeof d.lower === 'number' ? d.lower * 100 : null)}`, icon: 'target' };
+    case 'pilot_result': return { title: `Пилот ${safeText(d.pilot_number)} · ${channelNames[d.channel] || safeText(d.channel)}`, description: `${safeText(d.current_tariff)} / ${safeText(d.arpu_segment)} → ${safeText(d.target_tariff)}`, meta: `${num(d.n_customers)} абонентов · ${num(d.cost)} у.е. · наблюдение для канала ${pct(typeof d.observed_lift_ratio === 'number' ? d.observed_lift_ratio * 100 : null)} · нижняя граница базового эффекта ${pct(typeof d.lower === 'number' ? d.lower * 100 : null)}`, icon: 'target' };
     case 'run_start': return { title: 'Аудитория изучена', description: `${num(d.profile_size)} абонентов · ${num(d.queue_size)} гипотез в очереди`, meta: `Бюджет ${num(d.budget)} у.е. · ${num(d.contacts)} контактов`, icon: 'users' };
     case 'arm_selected': return { title: 'Выбрана гипотеза', description: Array.isArray(d.arm) ? d.arm.map(safeText).join(' → ') : 'Гипотеза передана на проверку', meta: `${num(d.requested_n)} контактов · ${channelNames[d.channel] || safeText(d.channel)} · ${d.reason === 'confirmation' ? 'уточнение оценки' : 'первая проверка'}`, icon: 'spark' };
     case 'plan_selected': return { title: 'План пересчитан', description: `${num(Array.isArray(d.campaigns) ? d.campaigns.length : null)} кампаний · ${num(d.contacts)} контактов`, meta: `${num(d.cost)} у.е. · ${d.fallback ? 'резервный план' : 'план по подтверждённым гипотезам'}`, icon: 'layers' };
@@ -462,8 +512,10 @@ function selectSource(source) {
 function setFile(role, file) {
   if (state.submitting || activeRun()) return;
   if (file && (!/\.csv$/i.test(file.name) || file.size === 0 || file.size > fileLimits[role])) {
-    formError(!/\.csv$/i.test(file.name) ? 'Выберите файл с расширением .csv.' : file.size === 0 ? 'Файл пуст. Выберите CSV с данными.' : `Файл «${file.name}» слишком большой. ${limitLabels[role]}.`);
+    delete state.files[role];
     $(`file-${role}`).value = '';
+    renderFiles();
+    formError(!/\.csv$/i.test(file.name) ? 'Выберите файл с расширением .csv.' : file.size === 0 ? 'Файл пуст. Выберите CSV с данными.' : `Файл «${file.name}» слишком большой. ${limitLabels[role]}.`, `file-${role}`);
     return;
   }
   if (file) state.files[role] = file; else { delete state.files[role]; $(`file-${role}`).value = ''; }
@@ -492,7 +544,7 @@ async function startRun(event) {
   const value = $('seed').value.trim();
   const seed = Number(value);
   if (!value || !Number.isInteger(seed) || seed < 0 || seed > 4_294_967_295) {
-    formError('Seed должен быть целым числом от 0 до 4294967295.'); $('seed').focus(); return;
+    formError('Seed должен быть целым числом от 0 до 4294967295.', 'seed'); $('seed').focus(); return;
   }
   state.submitting = true;
   state.revision += 1;
@@ -509,7 +561,7 @@ async function startRun(event) {
     if ([400, 413, 422].includes(error.status)) formError(error.message);
     else if (error.status === 409) {
       state.submitting = false;
-      await refresh();
+      if (!await refresh()) return;
       if (activeRun()) toast('На сервере уже идёт расчёт. Показываем его состояние.');
       else notice('Сервер занят', error.message, 'warning', () => void refresh());
     } else {
@@ -525,9 +577,11 @@ async function startRun(event) {
 async function download(key, request) {
   if (state.downloadBusy.has(key) || cooling() || !state.connected) return;
   const revision = state.revision;
+  const authRevision = state.authRevision;
   state.downloadBusy.add(key); updateControls();
   try {
     const { blob, filename } = await request();
+    if (authRevision !== state.authRevision || !state.connected) return;
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url; link.download = filename;
@@ -552,6 +606,7 @@ $('connection-dialog').addEventListener('close', () => { $('api-token').value = 
 $('connection-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (state.refreshing || state.submitting || cooling()) return;
+  clearPrivateView();
   api.setToken($('api-token').value);
   $('api-token').value = '';
   $('connection-error').hidden = true;
@@ -559,8 +614,9 @@ $('connection-form').addEventListener('submit', async event => {
   else { $('connection-error').textContent = $('notice-text').textContent; $('connection-error').hidden = false; }
 });
 $('forget-token').addEventListener('click', async () => {
+  if (state.refreshing || state.submitting) return;
+  clearPrivateView();
   api.setToken(''); $('api-token').value = '';
-  state.revision += 1; setConnection(false); stopPoll();
   if (await refresh()) { $('connection-dialog').close(); toast('Токен удалён из памяти'); }
 });
 document.querySelectorAll('[data-source]').forEach(tab => {
@@ -573,7 +629,7 @@ document.querySelectorAll('[data-source]').forEach(tab => {
   });
 });
 for (const role of roles) {
-  $(`file-${role}`).addEventListener('change', event => { if (event.target.files[0]) setFile(role, event.target.files[0]); });
+  $(`file-${role}`).addEventListener('change', event => { setFile(role, event.target.files[0] || null); });
   document.querySelector(`[data-remove="${role}"]`).addEventListener('click', () => setFile(role, null));
   const card = document.querySelector(`[data-role="${role}"]`);
   card.addEventListener('dragover', event => { event.preventDefault(); if (!state.submitting && !activeRun()) card.classList.add('is-dragging'); });
@@ -581,7 +637,7 @@ for (const role of roles) {
   card.addEventListener('drop', event => {
     event.preventDefault(); card.classList.remove('is-dragging');
     if (state.submitting || activeRun()) return;
-    if (event.dataTransfer.files.length !== 1) { formError('Перетащите один CSV в соответствующую область.'); return; }
+    if (event.dataTransfer.files.length !== 1) { setFile(role, null); formError('Перетащите один CSV в соответствующую область.', `file-${role}`); return; }
     setFile(role, event.dataTransfer.files[0]);
   });
 }

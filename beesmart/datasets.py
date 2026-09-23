@@ -2,11 +2,12 @@ from copy import deepcopy
 from pathlib import Path
 from threading import Lock
 
-import numpy as np
 import pandas as pd
 
+from beesmart.api_models import TariffSummary
 from beesmart.config import LIMITS, Settings
 from beesmart.serialization import json_safe
+from beesmart.uploads import FILENAMES, MAX_BYTES, UploadStore
 
 
 class DatasetRepository:
@@ -100,16 +101,20 @@ class DatasetRepository:
         if missing:
             return empty
         try:
-            profile = pd.read_csv(required[0], usecols=list(self.PROFILE_COLUMNS))
-            tariffs = pd.read_csv(required[1])
-            if "tariff_plan_code" not in tariffs or "price_tariff" not in tariffs:
-                raise ValueError("В справочнике отсутствуют обязательные колонки")
-            arpu = pd.to_numeric(profile["predicted_arpu"], errors="coerce")
-            if profile.empty or profile["ID_NUMBER"].isna().any() or profile["ID_NUMBER"].duplicated().any():
-                raise ValueError("Профиль пуст или содержит пустые/повторяющиеся ID")
-            if not np.isfinite(arpu.to_numpy()).all() or (arpu < 0).any():
-                raise ValueError("Некорректные значения predicted_arpu")
-            profile["predicted_arpu"] = arpu
+            # Server-installed CSVs need the same validation as uploads. This
+            # runs once per file fingerprint, outside the API event loop.
+            frames = {}
+            for role, filename in FILENAMES.items():
+                path = (self.root / filename).resolve()
+                if not path.is_relative_to(self.root) or path.stat().st_size > MAX_BYTES[role]:
+                    raise ValueError("Недопустимый путь или размер CSV")
+                frames[role] = UploadStore._read_csv(path, role)
+            UploadStore._validate(frames)
+            profile, tariffs = frames["profile"], frames["tariffs"]
+            tariff_rows = json_safe(tariffs.to_dict(orient="records"))
+            for row in tariff_rows:
+                TariffSummary.model_validate(row)
+            arpu = profile["predicted_arpu"]
             grouped = profile.groupby(["current_tariff", "arpu_segment"], observed=True)
             segments = grouped.agg(
                 customers=("ID_NUMBER", "size"), arpu_sum=("predicted_arpu", "sum"),
@@ -127,7 +132,7 @@ class DatasetRepository:
                                 for col in ("arpu_segment", "data_segment", "call_segment")},
                 },
                 "segments": segments.to_dict(orient="records"),
-                "tariffs": tariffs.to_dict(orient="records"),
+                "tariffs": tariff_rows,
             })
         except (ValueError, OSError, KeyError, pd.errors.ParserError):
             empty["dataset"].update(status="error", message="Не удалось проверить CSV: проверьте колонки, ID и ARPU")

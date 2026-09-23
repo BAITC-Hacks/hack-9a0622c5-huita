@@ -58,6 +58,7 @@ export class BeeSmartApi {
   #token = '';
   #baseUrl;
   #fetch;
+  #readRequests = new Map();
 
   constructor({ token = '', baseUrl = '', fetchImpl = globalThis.fetch } = {}) {
     if (typeof fetchImpl !== 'function') throw new ApiError(0, 'Браузер не поддерживает сетевые запросы.');
@@ -69,7 +70,15 @@ export class BeeSmartApi {
   }
 
   setToken(token) {
-    this.#token = typeof token === 'string' ? token.trim() : '';
+    const next = typeof token === 'string' ? token.trim() : '';
+    if (next !== this.#token) this.cancelReadRequests({ includeDownloads: true });
+    this.#token = next;
+  }
+
+  cancelReadRequests({ includeDownloads = false } = {}) {
+    for (const [controller, isDownload] of this.#readRequests) {
+      if (includeDownloads || !isDownload) controller.abort();
+    }
   }
 
   health() { return this.#request('/api/health'); }
@@ -133,6 +142,7 @@ export class BeeSmartApi {
 
   async #request(path, { method = 'GET', json, body, download, timeout = REQUEST_TIMEOUT } = {}) {
     const controller = new AbortController();
+    if (method === 'GET') this.#readRequests.set(controller, Boolean(download));
     const requestToken = this.#token;
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeout);
@@ -150,10 +160,12 @@ export class BeeSmartApi {
         method, headers, body, signal: controller.signal,
         credentials: 'omit', cache: 'no-store', redirect: 'error',
       });
+      if (controller.signal.aborted) throw new Error('Request aborted');
       status = response.status;
       retryAfter = retryDelay(response.headers.get('Retry-After'));
       if (!response.ok) {
         const raw = await response.text();
+        if (controller.signal.aborted) throw new Error('Request aborted');
         let message = '';
         try { message = detailText(JSON.parse(raw)?.detail); }
         catch {
@@ -165,20 +177,28 @@ export class BeeSmartApi {
       }
       if (download) {
         const blob = await response.blob();
+        if (controller.signal.aborted) throw new Error('Request aborted');
         return { blob, filename: safeFilename(response.headers.get('Content-Disposition'), download) };
       }
       const raw = await response.text();
+      if (controller.signal.aborted) throw new Error('Request aborted');
       try { return JSON.parse(raw); }
       catch { throw new ApiError(status, 'Сервер вернул ответ в неожиданном формате.', retryAfter); }
     } catch (error) {
-      if (error instanceof ApiError) throw error;
-      if (timedOut || error?.name === 'AbortError') {
+      if (controller.signal.aborted && !timedOut) {
+        const cancelled = new ApiError(0, 'Запрос отменён.');
+        cancelled.aborted = true;
+        throw cancelled;
+      }
+      if (timedOut) {
         throw new ApiError(0, 'Сервер не ответил вовремя. Проверьте состояние запуска перед повторной отправкой.');
       }
+      if (error instanceof ApiError) throw error;
       // Browser/network errors may contain URLs or headers. Do not expose them.
       throw new ApiError(0, 'Не удалось связаться с сервером. Проверьте подключение и адрес API.');
     } finally {
       clearTimeout(timer);
+      this.#readRequests.delete(controller);
     }
   }
 }

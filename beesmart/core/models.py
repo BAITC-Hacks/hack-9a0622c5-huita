@@ -45,8 +45,14 @@ class ArmStats:
         if not isfinite(observed) or actual_n <= 0 or not 0 < channel.multiplier <= 1:
             raise ValueError("Invalid nonsaturating pilot observation")
         precision = actual_n * channel.multiplier**2 / NOISE_STD**2
-        self.precision += precision
-        self.weighted_sum += observed / channel.multiplier * precision
+        next_precision = self.precision + precision
+        next_sum = self.weighted_sum + observed / channel.multiplier * precision
+        if not isfinite(next_precision) or next_precision <= 0 or not isfinite(next_sum):
+            raise ValueError("Pilot observation exceeds finite statistical range")
+        if not isfinite(next_sum / next_precision) or not isfinite(1 / next_precision):
+            raise ValueError("Pilot estimate exceeds finite statistical range")
+        self.precision = next_precision
+        self.weighted_sum = next_sum
         self.contacts += actual_n
         self.pilot_numbers.append(pilot_number)
 

@@ -12,6 +12,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
+from beesmart.api_models import RunRecord
 from beesmart.config import Settings
 from beesmart.intelligence import IntelligenceService
 from beesmart.llm import LLMError
@@ -56,6 +57,9 @@ class RunManager:
                 record = json.loads(path.read_text())
                 if str(UUID(record["id"])) == path.stem and record["status"] in ("queued", "running", "completed", "failed"):
                     record.setdefault("dataset", {"source": "bundled"})
+                    # A truncated or incompatible report must not break every
+                    # subsequent GET /api/runs/latest response after restart.
+                    RunRecord.model_validate(record)
                     if record["status"] in ("queued", "running"):
                         record.update(status="failed", error="Сервер перезапущен. Загрузите данные и повторите расчёт.", finished_at=timestamp())
                         if isinstance(record.get("llm"), dict) and record["llm"].get("status") in ("pending", "planning"):

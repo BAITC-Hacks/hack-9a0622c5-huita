@@ -17,6 +17,25 @@ from beesmart.llm import LLMError, PROMPT_VERSION, build_context, request_policy
 
 RESERVATION_MICRO_USD = 20_000  # $0.02; bounded 64 KiB input + 4096 output tokens.
 CACHE_ENTRIES = 128
+MAX_LEDGER_INTEGER = (1 << 63) - 1
+
+
+async def _storage_call(function, *args):
+    """Keep the owning lock until even a canceled file operation has finished."""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    canceled = False
+    while True:
+        try:
+            result = await asyncio.shield(task)
+            break
+        except asyncio.CancelledError:
+            canceled = True
+            if task.done():
+                result = task.result()
+                break
+    if canceled:
+        raise asyncio.CancelledError
+    return result
 
 
 def private_json(path: Path, value: dict) -> None:
@@ -53,12 +72,12 @@ class IntelligenceService:
                 if path.stat().st_size > 4096:
                     raise ValueError
                 value = json.loads(path.read_text())
-                if (set(value) != set(self._ledger) or value["version"] != 1
-                        or any(type(v) is not int or v < 0 for v in value.values())
+                if (not isinstance(value, dict) or set(value) != set(self._ledger) or value["version"] != 1
+                        or any(type(v) is not int or not 0 <= v <= MAX_LEDGER_INTEGER for v in value.values())
                         or value["completed"] > value["attempts"]):
                     raise ValueError
                 self._ledger = value
-            except (ValueError, OSError, TypeError):
+            except (ValueError, OSError, TypeError, RecursionError):
                 self._ledger_error = True  # Never reset corrupt spend tracking to zero.
 
     def info(self) -> dict:
@@ -99,12 +118,12 @@ class IntelligenceService:
         if self.settings.agent_provider == "local":
             return self.settings.root / "frozen_policy.json"
         async with self._lock:
-            context = await asyncio.to_thread(build_context, data_path)
+            context = await _storage_call(build_context, data_path)
             fingerprint = hashlib.sha256(
                 f"{PROMPT_VERSION}:{self.settings.openai_model}:{context.fingerprint}".encode()
             ).hexdigest()
             path = self.folder / "policies" / f"{fingerprint}.json"
-            cached = self._cached(path, context)
+            cached = await _storage_call(self._cached, path, context)
             if cached is not None:
                 metadata.update(status="cached", cache_hit=True, summary=cached["_llm"]["summary"],
                                 hypotheses=len(cached["priority_arms"]))
@@ -113,33 +132,39 @@ class IntelligenceService:
             used = self._ledger["estimated_micro_usd"] + self._ledger["reserved_micro_usd"]
             if used + RESERVATION_MICRO_USD > round(self.settings.llm_budget_usd * 1_000_000):
                 raise LLMError("budget_exhausted", "Достигнут лимит расходов OpenAI для приложения. Проверьте бюджет в .env; сохранённые политики остаются доступны.")
-            # Small bounded ledger writes are synchronous: a cancellation cannot
-            # race persistence and let a second request spend the same budget.
-            self._persist_ledger({**self._ledger,
-                "reserved_micro_usd": self._ledger["reserved_micro_usd"] + RESERVATION_MICRO_USD,
-                "attempts": self._ledger["attempts"] + 1})
-            metadata.update(status="planning", reserved_usd=RESERVATION_MICRO_USD / 1_000_000)
+            # The lock stays held until a canceled disk thread has finished.
+            # No HTTP request is sent before its durable reservation exists.
+            await _storage_call(self._reserve, metadata)
             response = await request_policy(context, api_key=self.settings.openai_api_key,
                                             model=self.settings.openai_model)
-            # Conservative estimate: includes the published cache-write premium,
-            # ignores discounts. This is not the OpenAI account billing balance.
-            cost = math.ceil(response.input_tokens * 0.125 + response.output_tokens * 0.5)
-            if cost > RESERVATION_MICRO_USD:
-                raise LLMError("usage_invalid", "Ответ OpenAI содержит неожиданную статистику расхода токенов.")
-            self._persist_ledger({**self._ledger,
-                "estimated_micro_usd": self._ledger["estimated_micro_usd"] + cost,
-                "reserved_micro_usd": self._ledger["reserved_micro_usd"] - RESERVATION_MICRO_USD,
-                "completed": self._ledger["completed"] + 1})
-            metadata.update(status="completed", summary=response.summary,
-                            input_tokens=response.input_tokens, output_tokens=response.output_tokens,
-                            estimated_cost_usd=cost / 1_000_000, reserved_usd=0.0,
-                            hypotheses=len(response.policy["priority_arms"]))
-            value = {**response.policy, "_llm": {"model": self.settings.openai_model,
-                     "prompt_version": PROMPT_VERSION, "summary": response.summary}}
-            private_json(path, value)
-            for old in sorted(path.parent.glob("*.json"), key=lambda item: item.stat().st_mtime)[:-CACHE_ENTRIES]:
-                old.unlink(missing_ok=True)
+            await _storage_call(self._complete, path, response, metadata)
             return path
+
+    def _reserve(self, metadata: dict) -> None:
+        self._persist_ledger({**self._ledger,
+            "reserved_micro_usd": self._ledger["reserved_micro_usd"] + RESERVATION_MICRO_USD,
+            "attempts": self._ledger["attempts"] + 1})
+        metadata.update(status="planning", reserved_usd=RESERVATION_MICRO_USD / 1_000_000)
+
+    def _complete(self, path: Path, response, metadata: dict) -> None:
+        # Conservative estimate: includes the published cache-write premium,
+        # ignores discounts. This is not the OpenAI account billing balance.
+        cost = math.ceil(response.input_tokens * 0.125 + response.output_tokens * 0.5)
+        if cost > RESERVATION_MICRO_USD:
+            raise LLMError("usage_invalid", "Ответ OpenAI содержит неожиданную статистику расхода токенов.")
+        self._persist_ledger({**self._ledger,
+            "estimated_micro_usd": self._ledger["estimated_micro_usd"] + cost,
+            "reserved_micro_usd": self._ledger["reserved_micro_usd"] - RESERVATION_MICRO_USD,
+            "completed": self._ledger["completed"] + 1})
+        metadata.update(status="completed", summary=response.summary,
+                        input_tokens=response.input_tokens, output_tokens=response.output_tokens,
+                        estimated_cost_usd=cost / 1_000_000, reserved_usd=0.0,
+                        hypotheses=len(response.policy["priority_arms"]))
+        value = {**response.policy, "_llm": {"model": self.settings.openai_model,
+                 "prompt_version": PROMPT_VERSION, "summary": response.summary}}
+        private_json(path, value)
+        for old in sorted(path.parent.glob("*.json"), key=lambda item: item.stat().st_mtime)[:-CACHE_ENTRIES]:
+            old.unlink(missing_ok=True)
 
     def _persist_ledger(self, value: dict) -> None:
         try:
@@ -168,5 +193,5 @@ class IntelligenceService:
                 return None
             path.touch()
             return value
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             return None

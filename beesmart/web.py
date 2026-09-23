@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Security
@@ -172,10 +172,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     dataset = await asyncio.shield(saving)
                 except asyncio.CancelledError:
-                    # Keep files open and reservation held until the I/O thread finishes.
-                    outcome = (await asyncio.gather(saving, return_exceptions=True))[0]
-                    if isinstance(outcome, dict):
-                        await asyncio.to_thread(uploads.discard, outcome["id"])
+                    # A second cancellation must not close multipart files or
+                    # release the slot while the saving thread still uses them.
+                    with suppress(UploadValidationError, OSError):
+                        outcome = await runs._finish_persistence(saving)
+                        cleanup = asyncio.create_task(asyncio.to_thread(uploads.discard, outcome["id"]))
+                        await runs._finish_persistence(cleanup)
                     raise
                 return await runs.start(seed, dataset=dataset, from_upload=True)
         except UploadValidationError as exc:

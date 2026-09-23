@@ -19,6 +19,8 @@ from typing import BinaryIO
 import numpy as np
 import pandas as pd
 
+from beesmart.config import LIMITS
+
 
 class UploadValidationError(ValueError):
     """Safe, user-facing explanation of an invalid CSV dataset."""
@@ -183,11 +185,18 @@ class UploadStore:
         # dataset. History is a sequence of events, not a unique customer table.
         arpu = cls._numeric(profile, "predicted_arpu", "profile", nonnegative=True)
         if not is_positive_finite_sum(arpu):
-            raise UploadValidationError("profile: суммарный predicted_arpu должен быть положительным и конечным.")
+            raise UploadValidationError("profile: суммарный predicted_arpu должен быть положительным и не переполнять числовой диапазон расчёта.")
         previous = cls._numeric(history, "AVG_ARPU_PREV_3M", "history")
-        cls._numeric(history, "AVG_ARPU_NEXT_3M", "history")
+        following = cls._numeric(history, "AVG_ARPU_NEXT_3M", "history")
         if not bool((previous >= 100).any()):
             raise UploadValidationError("history: нужна хотя бы одна строка с AVG_ARPU_PREV_3M ≥ 100.")
+        if pd.api.types.is_integer_dtype(previous.dtype) and pd.api.types.is_integer_dtype(following.dtype):
+            difference_dtype = np.result_type(previous.dtype, following.dtype)
+            if np.issubdtype(difference_dtype, np.integer):
+                bounds = np.iinfo(difference_dtype)
+                if any(not bounds.min <= int(after) - int(before) <= bounds.max
+                       for before, after in zip(previous, following) if before >= 100):
+                    raise UploadValidationError("history: разность ARPU переполняет числовой диапазон расчёта.")
         cls._numeric(tariffs, "price_tariff", "tariffs", nonnegative=True)
         codes = tariffs["tariff_plan_code"]
         if codes.isna().any() or codes.duplicated().any():
@@ -242,6 +251,18 @@ class UploadStore:
 
 
 def is_positive_finite_sum(values: pd.Series) -> bool:
+    if pd.api.types.is_integer_dtype(values.dtype):
+        # The unmodified evaluator sums the original integer dtype. A wrapped
+        # positive int64 sum must not be mistaken for a valid baseline.
+        dtype = getattr(values.dtype, "numpy_dtype", values.dtype)
+        total = sum(map(int, values))
+        return 0 < total <= np.iinfo(dtype).max
     with np.errstate(over="ignore", invalid="ignore"):
         total = float(values.sum())
-    return bool(np.isfinite(total) and total > 0)
+    # Growth is evaluated as 100 * net_gain / baseline, in that order. Leave
+    # room for the clipped effect (3), channel multiplier (1.2), and percentage
+    # multiplication, and for dividing the maximum contact loss by baseline.
+    maximum = np.finfo(np.float64).max
+    minimum_baseline = 8 * 100 * LIMITS["total_budget"] / maximum
+    maximum_baseline = maximum / (8 * 100)
+    return bool(np.isfinite(total) and minimum_baseline <= total <= maximum_baseline)

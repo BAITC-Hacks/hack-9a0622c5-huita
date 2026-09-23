@@ -91,6 +91,11 @@ class Planner:
                 candidate = Candidate(segment, arm, push, gain, effect, fresh)
                 possibilities.append((loss, segment.n, candidate.key, candidate))
         if not possibilities:
+            if stats:
+                # Observations may cover only oversized/depleted cells. A
+                # different unobserved cell can still provide a legal final
+                # campaign; do not turn available mandatory output into [].
+                return self.fallback({}, ledger, budget, contacts)
             return Plan(fallback=True)
         return Plan([min(possibilities, key=lambda item: item[:3])[3]], fallback=True)
 

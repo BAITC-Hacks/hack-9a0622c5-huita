@@ -122,8 +122,9 @@ class CampaignAgent:
                 observed = float(result["observed_lift_ratio"])
                 if actual != spent or actual <= 0 or actual > n or not isfinite(observed):
                     raise ValueError("Invalid pilot result or inconsistent resource ledger")
-                statistics = stats.setdefault(arm, ArmStats())
+                statistics = stats.get(arm) or ArmStats()
                 statistics.update(observed, actual, channel, used)
+                stats[arm] = statistics
             except (KeyError, TypeError, ValueError, OverflowError):
                 flags.append("invalid_pilot_observation")
                 self.emit("pilot_error", {"arm": list(arm), "error_type": "InvalidObservation", "retry": False})
