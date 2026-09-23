@@ -10,12 +10,15 @@ from beesmart.serialization import json_safe
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent.parent
+    root = Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(root))
+    # Organizer sources stay untouched in their own directory. Their imports
+    # are flat by contract, so only the isolated evaluator adds this path.
+    sys.path.insert(0, str(root / "organizer"))
     parser = argparse.ArgumentParser()
     parser.add_argument("seed", type=int)
     parser.add_argument("--data-dir", type=Path, default=root)
-    parser.add_argument("--policy-path", type=Path, default=root / "frozen_policy.json")
+    parser.add_argument("--policy-path", type=Path, default=root / "policies/frozen_policy.json")
     args = parser.parse_args()
     seed = args.seed
     # This path is supplied only by the server, never accepted from an HTTP request.

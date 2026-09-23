@@ -33,7 +33,7 @@ def saved_run(tmp_path, synthetic_frames):
     policy_path.parent.mkdir(parents=True)
     policy_path.write_text(json.dumps(policy))
     # No HTTP: manually frozen priorities exercise the same real worker path.
-    completed = subprocess.run([sys.executable, "-m", "beesmart.worker", "42", "--data-dir", str(dataset),
+    completed = subprocess.run([sys.executable, "-m", "beesmart.application.worker", "42", "--data-dir", str(dataset),
                                 "--policy-path", str(policy_path)], cwd=ROOT,
                                env=exporter._worker_environment(), check=True, capture_output=True, text=True, timeout=30)
     result = next(value["data"] for line in completed.stdout.splitlines()
@@ -64,12 +64,16 @@ def test_export_replays_private_policy_official_generator_and_never_inherits_sec
     monkeypatch.setattr(exporter.subprocess, "run", observed_run)
     output = exporter.build_submission(settings, report["id"])
     assert output == settings.storage_path / "submissions" / report["id"]
-    assert (output / "frozen_policy.json").read_bytes() == policy_path.read_bytes()
-    assert hashlib.sha256((output / "frozen_policy.json").read_bytes()).hexdigest() == report["diagnostics"]["policy_hash"]
-    assert (output / "make_submission.py").read_bytes() == (ROOT / "make_submission.py").read_bytes()
-    assert json.loads((output / "manifest.json").read_text())["verified"] is True
+    assert (output / "policies/frozen_policy.json").read_bytes() == policy_path.read_bytes()
+    assert hashlib.sha256((output / "policies/frozen_policy.json").read_bytes()).hexdigest() == report["diagnostics"]["policy_hash"]
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["verified"] is True
+    for name in ("environment.py", "mock_environment.py", "scoring_core.py", "local_eval.py", "make_submission.py"):
+        original = (ROOT / "organizer" / name).read_bytes()
+        assert (output / name).read_bytes() == original
+        assert manifest["source_sha256"][name] == hashlib.sha256(original).hexdigest()
     expected = set(exporter.CODE_FILES) | set(exporter.DATA_FILES) | {
-        "frozen_policy.json", "requirements.txt", "submission.csv", "manifest.json", "README.txt"}
+        "policies/frozen_policy.json", "requirements.txt", "submission.csv", "manifest.json", "README.txt"}
     assert {str(path.relative_to(output)) for path in output.rglob("*") if path.is_file()} == expected
     assert stat.S_IMODE(output.stat().st_mode) == 0o700
     for path in output.rglob("*"):

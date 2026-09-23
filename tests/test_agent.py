@@ -7,9 +7,9 @@ import pandas as pd
 import pytest
 
 from agent import Agent
-from beesmart.core.domain import load_domain
-from beesmart.core.models import ArmStats, Channel, NOISE_STD
-from beesmart.core.planner import Planner
+from beesmart.agent.domain import load_domain
+from beesmart.agent.models import ArmStats, Channel, NOISE_STD
+from beesmart.agent.planner import Planner
 from environment import make_environment
 
 

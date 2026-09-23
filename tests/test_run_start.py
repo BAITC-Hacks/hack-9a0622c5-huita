@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from beesmart.config import Settings
-from beesmart.runs import RunBusyError, RunManager
+from beesmart.application.runs import RunBusyError, RunManager
 
 
 def test_slow_persistence_keeps_loop_responsive_and_reserves_start(tmp_path, monkeypatch):
@@ -108,7 +108,7 @@ def test_report_failure_cleans_temporary_file_and_releases_start(tmp_path, monke
         def fail_fsync(_):
             raise OSError("Simulated disk failure")
 
-        monkeypatch.setattr("beesmart.runs.os.fsync", fail_fsync)
+        monkeypatch.setattr("beesmart.application.runs.os.fsync", fail_fsync)
         with pytest.raises(OSError, match="Simulated"):
             await manager.start(42)
         assert not manager._starting and manager._active is None

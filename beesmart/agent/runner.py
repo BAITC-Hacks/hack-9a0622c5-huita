@@ -17,7 +17,7 @@ class CampaignAgent:
     def __init__(self, event_sink=None, *, history_path=None, policy_path=None):
         self.event_sink = event_sink
         self.history_path = Path(history_path) if history_path is not None else ROOT / "data/change_tariff.csv"
-        self.policy_path = Path(policy_path) if policy_path is not None else ROOT / "frozen_policy.json"
+        self.policy_path = Path(policy_path) if policy_path is not None else ROOT / "policies/frozen_policy.json"
         self.diagnostics = {}
         self.last_plan = []
 

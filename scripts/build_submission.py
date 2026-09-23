@@ -29,12 +29,18 @@ from beesmart.config import Settings
 
 COLUMNS = ["campaign_name", "filter_arpu_segment", "filter_data_segment",
            "filter_call_segment", "filter_current_tariff", "target_tariff", "channel"]
-CODE_FILES = (
-    "agent.py", "beesmart/__init__.py", "beesmart/core/__init__.py",
-    "beesmart/core/domain.py", "beesmart/core/models.py", "beesmart/core/planner.py",
-    "beesmart/core/runner.py", "environment.py", "scoring_core.py", "mock_environment.py",
-    "local_eval.py", "make_submission.py",
-)
+# Destination -> repository source. The official scripts retain their flat
+# import layout in the private export; the participant package keeps its name.
+CODE_FILES = {
+    name: name for name in (
+        "agent.py", "beesmart/__init__.py", "beesmart/agent/__init__.py",
+        "beesmart/agent/domain.py", "beesmart/agent/models.py", "beesmart/agent/planner.py",
+        "beesmart/agent/runner.py",
+    )
+} | {name: f"organizer/{name}" for name in (
+    "environment.py", "scoring_core.py", "mock_environment.py", "local_eval.py", "make_submission.py",
+)}
+POLICY_FILE = "policies/frozen_policy.json"
 DATA_FILES = {"customer_profile.csv": 32 * 1024 * 1024,
               "data/change_tariff.csv": 16 * 1024 * 1024,
               "data/dict_tariff.csv": 256 * 1024}
@@ -61,7 +67,7 @@ def _write_file(path: Path, value: bytes) -> None:
 
 
 def _exact_policy(settings: Settings, expected_hash: str) -> bytes:
-    paths = [settings.root / "frozen_policy.json"]
+    paths = [settings.root / POLICY_FILE]
     folder = settings.storage_path / "llm" / "policies"
     if folder.is_dir():
         # A healthy cache has <=128 entries. Bound scans even for corrupt storage.
@@ -146,13 +152,13 @@ def build_submission(settings: Settings, run_id: str, *, output: Path | None = N
         staging = Path(tempfile.mkdtemp(prefix=".submission-", dir=destination.parent))
         os.chmod(staging, 0o700)
         source_hashes = {}
-        for filename in CODE_FILES:
-            value = _read_file(settings.root / filename, 2_000_000)
+        for filename, source in CODE_FILES.items():
+            value = _read_file(settings.root / source, 2_000_000)
             _write_file(staging / filename, value)
             source_hashes[filename] = hashlib.sha256(value).hexdigest()
         for filename, limit in DATA_FILES.items():
             _write_file(staging / filename, _read_file(data_root / filename, limit))
-        _write_file(staging / "frozen_policy.json", policy)
+        _write_file(staging / POLICY_FILE, policy)
         # Only the libraries required by the offline agent/official evaluator.
         from importlib.metadata import version
         dependencies = "".join(f"{name}=={version(name)}\n" for name in ("numpy", "pandas"))
@@ -172,8 +178,8 @@ def build_submission(settings: Settings, run_id: str, *, output: Path | None = N
         _write_file(staging / "README.txt", (
             "Локальный воспроизводимый экспорт BeeSmart, seed 42.\n"
             "План проверен оригинальной командой: python make_submission.py\n"
-            "Для сдачи нужны agent.py, пакет beesmart/core с __init__.py,\n"
-            "frozen_policy.json, requirements.txt и submission.csv.\n"
+            "Для сдачи нужны agent.py, пакет beesmart/agent с __init__.py,\n"
+            "policies/frozen_policy.json, requirements.txt и submission.csv.\n"
             "Три CSV исходных данных здесь только для локальной проверки;\n"
             "не добавляйте их в Git и не отправляйте как исходный код.\n"
             "Официальные environment/scoring/mock/local_eval/make_submission.py\n"

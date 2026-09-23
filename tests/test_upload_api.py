@@ -7,8 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from beesmart.config import Settings
-from beesmart.runs import RunBusyError, RunManager
-from beesmart.web import create_app
+from beesmart.application.runs import RunBusyError, RunManager
+from beesmart.api.app import create_app
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,9 +19,9 @@ HEADERS = {"X-BeeSmart-Request": "1"}
 def upload_app(tmp_path):
     (tmp_path / "static").mkdir()
     shutil.copytree(ROOT / "beesmart", tmp_path / "beesmart", ignore=shutil.ignore_patterns("__pycache__"))
-    for name in ("agent.py", "environment.py", "mock_environment.py", "scoring_core.py",
-                 "local_eval.py", "make_submission.py", "frozen_policy.json"):
-        shutil.copy2(ROOT / name, tmp_path / name)
+    shutil.copytree(ROOT / "organizer", tmp_path / "organizer", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "policies", tmp_path / "policies")
+    shutil.copy2(ROOT / "agent.py", tmp_path / "agent.py")
     return create_app(Settings(root=tmp_path))
 
 
@@ -76,7 +76,7 @@ def test_upload_rejects_invalid_inputs_and_releases_reservation(upload_app, tmp_
                            data={"seed": "-1"}, headers=HEADERS).status_code == 422
         assert client.post("/api/uploads/run", files=source_files(synthetic_frames),
                            headers={**HEADERS, "Origin": "https://evil.example"}).status_code == 403
-        import beesmart.upload_form as parser
+        import beesmart.api.upload_form as parser
         monkeypatch.setattr(parser, "MAX_UPLOAD_BYTES", 64)
         # No Content-Length: the streamed byte guard must still reject the body.
         multipart = (b'--test\r\nContent-Disposition: form-data; name="profile"; filename="x.csv"\r\n'

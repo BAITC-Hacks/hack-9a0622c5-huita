@@ -16,7 +16,7 @@ class StorageLease:
         except OSError:
             self._file.close()
             self._file = None
-            raise RuntimeError("Storage is already in use; run exactly one BeeSmart API worker") from None
+            raise RuntimeError("Storage is already in use; stop the BeeSmart server or use a separate storage directory") from None
 
     def release(self):
         if self._file is not None:

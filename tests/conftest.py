@@ -1,7 +1,14 @@
 """Generated test inputs; organizer CSVs are never needed by the test suite."""
 
+from pathlib import Path
+import sys
+
 import pandas as pd
 import pytest
+
+
+# Unmodified organizer modules use flat imports inside their isolated bundle.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "organizer"))
 
 
 @pytest.fixture

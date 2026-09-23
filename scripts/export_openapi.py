@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from beesmart.config import Settings
-from beesmart.web import create_app
+from beesmart.api.app import create_app
 
 
 def main():

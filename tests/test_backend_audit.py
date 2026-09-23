@@ -13,13 +13,13 @@ import pandas as pd
 import pytest
 from starlette.requests import Request
 
-from beesmart import intelligence
+from beesmart.agent import intelligence
 from beesmart.config import Settings
-from beesmart.intelligence import IntelligenceService
-from beesmart.llm import LLMError, PlanningContext, PolicyResponse
-from beesmart.runs import RunManager
-from beesmart.uploads import UploadStore, UploadValidationError
-from beesmart.web import create_app
+from beesmart.agent.intelligence import IntelligenceService
+from beesmart.agent.llm import LLMError, PlanningContext, PolicyResponse
+from beesmart.application.runs import RunManager
+from beesmart.application.uploads import UploadStore, UploadValidationError
+from beesmart.api.app import create_app
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,7 +146,7 @@ def test_repeated_upload_cancel_keeps_files_and_reservation_until_store_finishes
             for stream in streams.values():
                 stream.close()
 
-    monkeypatch.setattr("beesmart.web.upload_form", fake_form)
+    monkeypatch.setattr("beesmart.api.app.upload_form", fake_form)
     app = create_app(Settings(root=ROOT, storage_dir=tmp_path))
     app.state.runs = runs
     app.state.uploads = SimpleNamespace(create=create, discard=discard)

@@ -4,10 +4,10 @@ from threading import Lock
 
 import pandas as pd
 
-from beesmart.api_models import TariffSummary
+from beesmart.application.contracts import TariffSummary
 from beesmart.config import LIMITS, Settings
 from beesmart.serialization import json_safe
-from beesmart.uploads import FILENAMES, MAX_BYTES, UploadStore
+from beesmart.application.uploads import FILENAMES, MAX_BYTES, UploadStore
 
 
 class DatasetRepository:
@@ -23,12 +23,8 @@ class DatasetRepository:
         "tariff_dictionary": "tariff_dictionary.csv",
     }
     RUNTIME_FILES = (
-        "environment.py", "mock_environment.py", "scoring_core.py",
-        "local_eval.py", "make_submission.py", "agent.py",
-    )
-    PROFILE_COLUMNS = (
-        "ID_NUMBER", "current_tariff", "arpu_segment", "data_segment",
-        "call_segment", "predicted_arpu",
+        "organizer/environment.py", "organizer/mock_environment.py", "organizer/scoring_core.py",
+        "organizer/local_eval.py", "organizer/make_submission.py", "agent.py",
     )
 
     def __init__(self, settings: Settings):

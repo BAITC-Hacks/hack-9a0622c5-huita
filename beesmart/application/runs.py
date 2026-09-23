@@ -12,10 +12,10 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from beesmart.api_models import RunRecord
+from beesmart.application.contracts import RunRecord
 from beesmart.config import Settings
-from beesmart.intelligence import IntelligenceService
-from beesmart.llm import LLMError
+from beesmart.agent.intelligence import IntelligenceService
+from beesmart.agent.llm import LLMError
 
 
 CAMPAIGN_COLUMNS = [
@@ -179,7 +179,7 @@ class RunManager:
             if self.settings.agent_provider == "openai":
                 record["events"].append({"event": "agent_policy_ready", "data": {
                     "cache_hit": record["llm"]["cache_hit"], "hypotheses": record["llm"]["hypotheses"]}})
-            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"]),
+            arguments = [sys.executable, "-m", "beesmart.application.worker", str(record["seed"]),
                          "--data-dir", str(data_path), "--policy-path", str(policy_path)]
             process = await asyncio.create_subprocess_exec(
                 *arguments,
@@ -210,7 +210,7 @@ class RunManager:
             record.update(status="failed", error="Расчёт остановлен вместе с сервером.")
             raise
         except (OSError, ValueError, KeyError, RuntimeError):
-            record.update(status="failed", error="Расчёт не завершён. Проверьте данные командой python local_eval.py.")
+            record.update(status="failed", error="Расчёт не завершён. Проверьте CSV и повторите запуск агента.")
         except Exception as exc:
             logging.getLogger(__name__).error("Run failed (%s)", type(exc).__name__)
             record.update(status="failed", error="Расчёт остановлен из-за внутренней ошибки; повторите после проверки сервера.")
@@ -252,3 +252,9 @@ class RunManager:
         if self._active is not None and not self._active.done():
             self._active.cancel()
             await asyncio.gather(self._active, return_exceptions=True)
+
+    async def wait(self, run_id: str) -> dict | None:
+        """Await the current computation without coupling callers to task internals."""
+        if self._active is not None:
+            await asyncio.shield(self._active)
+        return self.get(run_id)

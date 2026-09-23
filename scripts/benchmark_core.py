@@ -19,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "organizer"))
 
 from agent import Agent
 from mock_environment import make_mock_env
@@ -57,7 +58,7 @@ def main():
     parser.add_argument("--phase", choices=("before", "after"), required=True)
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--data-dir", type=Path, default=ROOT)
-    parser.add_argument("--policy", type=Path, default=ROOT / "frozen_policy.json")
+    parser.add_argument("--policy", type=Path, default=ROOT / "policies/frozen_policy.json")
     parser.add_argument("--output", type=Path, default=ROOT / "work/performance-core.json")
     args = parser.parse_args()
     if args.runs < 5:
@@ -76,13 +77,14 @@ def main():
     stats = pstats.Stats(profiler)
     functions = []
     for (filename, line, function), (primitive, total, own, cumulative, _) in stats.stats.items():
-        if "/beesmart/core/" in filename or filename.endswith("environment.py"):
+        if "/beesmart/agent/" in filename or filename.endswith("environment.py"):
             functions.append({"function": f"{Path(filename).name}:{line}:{function}", "calls": total,
                               "own_seconds": own, "cumulative_seconds": cumulative})
     phase = {"python": platform.python_version(), "platform": platform.platform(), "runs": args.runs,
              "measurement": "Agent.act only; environment creation and CSV setup excluded; no LLM calls",
              "inputs_sha256": inputs,
-             "core_sha256": {path.name: digest(path) for path in sorted((ROOT / "beesmart/core").glob("*.py"))},
+             "core_sha256": {name: digest(ROOT / "beesmart/agent" / name)
+                             for name in ("__init__.py", "domain.py", "models.py", "planner.py", "runner.py")},
              "timings_seconds": timings, "median_seconds": statistics.median(timings),
              "minimum_seconds": min(timings), "maximum_seconds": max(timings),
              "seeds": seeds, "profile_top": sorted(functions, key=lambda row: -row["cumulative_seconds"])[:25]}

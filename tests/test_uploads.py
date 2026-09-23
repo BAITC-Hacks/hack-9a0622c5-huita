@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from beesmart.uploads import FILENAMES, MAX_BYTES, MAX_ROWS, UploadStore, UploadValidationError
+from beesmart.application.uploads import FILENAMES, MAX_BYTES, MAX_ROWS, UploadStore, UploadValidationError
 
 
 def frames():

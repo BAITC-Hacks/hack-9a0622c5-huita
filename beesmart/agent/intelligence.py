@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from beesmart.config import Settings
-from beesmart.llm import LLMError, PROMPT_VERSION, build_context, request_policy
+from beesmart.agent.llm import LLMError, PROMPT_VERSION, build_context, request_policy
 
 
 RESERVATION_MICRO_USD = 20_000  # $0.02; bounded 64 KiB input + 4096 output tokens.
@@ -116,7 +116,7 @@ class IntelligenceService:
     async def prepare(self, data_path: Path, metadata: dict) -> Path:
         self.check_ready()
         if self.settings.agent_provider == "local":
-            return self.settings.root / "frozen_policy.json"
+            return self.settings.root / "policies/frozen_policy.json"
         async with self._lock:
             context = await _storage_call(build_context, data_path)
             fingerprint = hashlib.sha256(

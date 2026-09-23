@@ -3,6 +3,9 @@
 Backend: Python 3.12+, FastAPI. Frontend: HTML, CSS, JavaScript без Node.js.
 Запуск: `python -m beesmart`; адрес: http://127.0.0.1:8000.
 HTML размещается в `static/index.html`, остальные файлы — в `static/`.
+HTTP-слой реализован в `beesmart/api/app.py`; обработку запусков и worker выполняет
+`beesmart/application/`. Расчётный агент находится в `beesmart/agent/` и вызывается
+через тот же процесс выполнения из CLI. [Архитектура](architecture.md).
 Локально все запросы можно отправлять на тот же origin. В production используются
 HTTPS и `Authorization: Bearer <токен BeeSmart>`. Отдельный frontend-origin разрешается
 через `BEESMART_ALLOWED_ORIGINS`; wildcard запрещён. Доступ внутри одной команды общий.
@@ -24,7 +27,7 @@ HTTPS и `Authorization: Bearer <токен BeeSmart>`. Отдельный front
 | `GET /api/runs/{id}/submission.csv` | Скачать финальные кампании готового запуска |
 | `GET /api/runs/{id}/report.json` | Скачать отчёт |
 | `GET /api/data/{file_id}` | Исходный CSV; разрешённые ссылки в `overview.files` |
-| `GET /openapi.json` | Машиночитаемая схема API |
+| `GET /openapi.json`, `GET /open.json` | Публичная машиночитаемая схема API |
 
 Для всех POST обязателен `X-BeeSmart-Request: 1`. `/api/runs` принимает JSON,
 а `/api/uploads/run` — `multipart/form-data`; браузер сам выставляет его Content-Type.
@@ -48,13 +51,15 @@ Seed — целое число от 0 до 4294967295. При активном �
 В overview: `project`, `limits`, `dataset`, `runtime`, `segments`, `tariffs`,
 `providers`, `files`, `agent`. `runtime.ready=false` означает, что отсутствуют необходимые
 данные/модули. Готовность провайдера проверяется отдельно в `agent.ready`.
-Исходники и синтетические данные — оригинальная выдача организаторов.
+Модули среды в `organizer/` и синтетические CSV получены от организаторов.
+Рабочие данные хранятся отдельно от исходников BeeSmart.
 Эффекты mock отличаются от скрытого судейства; результат UI не является будущим баллом.
 
 Лимиты OpenAI и Brev/NVIDIA — по $50, раздельно. `providers[].app_spend_usd` относится
 только к оценке расходов этого приложения; баланс аккаунта не считывается
 (`account_balance_usd=null`). Brev/NVIDIA в текущем расчёте не используется.
-Сетевых вызовов LLM во время `Agent.act` нет: при выборе OpenAI подготовка политики
+OpenAI делает не более одного запроса при некэшированной подготовке.
+Итеративного LLM tool calling нет. Сетевых вызовов LLM во время `Agent.act` нет: при выборе OpenAI подготовка политики
 происходит до запуска worker. API-ключи не передаются браузеру или worker.
 
 ## Состояние агента и этап OpenAI
@@ -123,35 +128,23 @@ Production-токен BeeSmart вводит пользователь; храни
 Нужны ячейка для пилота минимум из 10 абонентов и хотя бы один допустимый
 финальный сегмент до 5 000 абонентов.
 
-```javascript
-// profileFile, historyFile, tariffsFile — File из трёх <input type="file">.
-async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress,
-                            { apiBase = '', accessToken = '' } = {}) {
-  const form = new FormData();
-  form.append('profile', profileFile);
-  form.append('history', historyFile);
-  form.append('tariffs', tariffsFile);
-  form.append('seed', '42');
-  const headers = { 'X-BeeSmart-Request': '1' };
-  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-  let response = await fetch(`${apiBase}/api/uploads/run`, {
-    method: 'POST', headers, body: form,
-  });
-  let run = await response.json();
-  if (!response.ok) throw new Error(run.detail || 'Ошибка загрузки');
-  onProgress(run);
-  while (run.status === 'queued' || run.status === 'running') {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    response = await fetch(`${apiBase}/api/runs/${run.id}`, { headers });
-    const next = await response.json();
-    if (!response.ok) throw new Error(next.detail || 'Ошибка получения результата');
-    run = next;
-    onProgress(run);
-  }
-  if (run.status === 'failed') throw new Error(run.error);
-  return run;
-}
+Пример для локального режима из каталога приватного пакета данных:
+
+```bash
+curl http://127.0.0.1:8000/api/uploads/run \
+  -H 'X-BeeSmart-Request: 1' \
+  -F 'profile=@customer_profile.csv' \
+  -F 'history=@data/change_tariff.csv' \
+  -F 'tariffs=@data/dict_tariff.csv' \
+  -F 'seed=42'
 ```
+
+Для браузера используйте `FormData` и клиент из [static/api.js](../static/api.js).
+Он задаёт Authorization и служебный заголовок, обрабатывает таймауты и отмену GET.
+Опрос и отображение результата находятся в [static/app.js](../static/app.js).
+При смене токена отменяйте прежние запросы и очищайте данные предыдущего подключения.
+После таймаута POST сначала прочитайте `/api/runs/latest`: сервер мог принять запуск.
+Автоматический повтор POST может создать лишний расчёт и новый платный запрос.
 
 Отдельный POST `/api/runs` после загрузки не нужен. Ответ 202 означает, что CSV
 прошли проверку и расчёт поставлен в очередь. Пока идёт загрузка или расчёт,

@@ -17,8 +17,10 @@ RUN python -m pip install --no-cache-dir -r requirements.txt -c requirements.loc
     && chown -R 10001:10001 /var/lib/beesmart
 
 # Explicit allowlist: no COPY ., no local CSVs, .env, notebooks, or work artifacts.
-COPY agent.py environment.py scoring_core.py mock_environment.py local_eval.py make_submission.py frozen_policy.json open.json ./
+COPY agent.py open.json ./
 COPY beesmart/ ./beesmart/
+COPY organizer/ ./organizer/
+COPY policies/ ./policies/
 COPY static/ ./static/
 
 USER 10001:10001

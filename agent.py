@@ -1,6 +1,6 @@
 """Participant entry point; run with the unmodified official local_eval.py."""
 
-from beesmart.core.runner import CampaignAgent
+from beesmart.agent.runner import CampaignAgent
 
 
 class Agent(CampaignAgent):

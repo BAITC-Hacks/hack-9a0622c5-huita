@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 
 from agent import Agent
-from beesmart.core.models import ArmStats, Channel
+from beesmart.agent.models import ArmStats, Channel
 from environment import make_environment
 
 
@@ -82,7 +82,7 @@ def test_overflowing_first_pilot_stops_without_retry_and_preserves_finite_fallba
 
 
 def test_worker_resolves_explicit_policy_before_switching_to_dataset_directory(tmp_path, monkeypatch, capsys):
-    from beesmart import worker
+    from beesmart.application import worker
     import local_eval
 
     invocation = tmp_path / "invocation"
@@ -100,7 +100,7 @@ def test_worker_resolves_explicit_policy_before_switching_to_dataset_directory(t
 
     monkeypatch.setattr(local_eval, "evaluate_agent", evaluate)
     monkeypatch.chdir(invocation)
-    monkeypatch.setattr("sys.argv", ["beesmart.worker", "42", "--data-dir", str(dataset),
+    monkeypatch.setattr("sys.argv", ["beesmart.application.worker", "42", "--data-dir", str(dataset),
                                     "--policy-path", "selected-policy.json"])
     worker.main()
     assert captured == [policy]
@@ -108,7 +108,7 @@ def test_worker_resolves_explicit_policy_before_switching_to_dataset_directory(t
 
 
 def test_llm_candidate_cap_keeps_rare_arpu_classes(tmp_path, synthetic_frames):
-    from beesmart.llm import build_context, MAX_CANDIDATES
+    from beesmart.agent.llm import build_context, MAX_CANDIDATES
 
     codes = ["tariff_a", "tariff_b", "tariff_c", *[f"tariff_x{i}" for i in range(40)]]
     rows = [{"current_tariff": code, "arpu_segment": "LOW", "predicted_arpu": 700.0}

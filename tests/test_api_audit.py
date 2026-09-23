@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from beesmart.config import Settings
-from beesmart.web import create_app
+from beesmart.api.app import create_app
 
 
 ROOT = Path(__file__).resolve().parents[1]

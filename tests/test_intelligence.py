@@ -10,10 +10,10 @@ from pathlib import Path
 import httpx
 import pytest
 
-from beesmart import intelligence, llm
+from beesmart.agent import intelligence, llm
 from beesmart.config import Settings
-from beesmart.intelligence import IntelligenceService
-from beesmart.runs import RunManager, RunBusyError
+from beesmart.agent.intelligence import IntelligenceService
+from beesmart.application.runs import RunManager, RunBusyError
 
 
 ROOT = Path(__file__).resolve().parents[1]

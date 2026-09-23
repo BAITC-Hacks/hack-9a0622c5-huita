@@ -8,9 +8,9 @@ import httpx
 import pytest
 
 from beesmart.config import Settings
-from beesmart.intelligence import IntelligenceService
-from beesmart.llm import LLMError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PlanningContext, request_policy
-from beesmart.runs import RunManager
+from beesmart.agent.intelligence import IntelligenceService
+from beesmart.agent.llm import LLMError, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, PlanningContext, request_policy
+from beesmart.application.runs import RunManager
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def test_provider_endpoint_ignores_environment_and_key_stays_in_header(security_
         assert "tools" not in json.loads(request.content)
         return httpx.Response(200, json=response_payload())
 
-    monkeypatch.setattr("beesmart.llm.httpx.AsyncClient", client_factory)
+    monkeypatch.setattr("beesmart.agent.llm.httpx.AsyncClient", client_factory)
     asyncio.run(request_policy(security_context, api_key=generated_key, transport=httpx.MockTransport(handler)))
     assert len(calls) == len(client_options) == 1
     assert client_options[0]["trust_env"] is False
@@ -188,11 +188,11 @@ def test_local_provider_never_builds_context_or_calls_network(tmp_path, monkeypa
     def forbidden(*_args, **_kwargs):
         raise AssertionError("Local mode must have no LLM preparation or paid call")
 
-    monkeypatch.setattr("beesmart.intelligence.build_context", forbidden)
-    monkeypatch.setattr("beesmart.intelligence.request_policy", forbidden)
+    monkeypatch.setattr("beesmart.agent.intelligence.build_context", forbidden)
+    monkeypatch.setattr("beesmart.agent.intelligence.request_policy", forbidden)
     service = IntelligenceService(Settings(root=tmp_path, agent_provider="local"))
     metadata = service.initial_record()
-    assert asyncio.run(service.prepare(tmp_path, metadata)) == tmp_path / "frozen_policy.json"
+    assert asyncio.run(service.prepare(tmp_path, metadata)) == tmp_path / "policies/frozen_policy.json"
     assert metadata["status"] == "disabled"
     assert not service.info()["paid_calls"]
     assert not (tmp_path / "work" / "llm").exists()
@@ -234,7 +234,7 @@ def test_provider_credentials_never_reach_worker_or_run_metadata(tmp_path, monke
         return Process()
 
     monkeypatch.setattr(manager.intelligence, "prepare", fake_prepare)
-    monkeypatch.setattr("beesmart.runs.asyncio.create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr("beesmart.application.runs.asyncio.create_subprocess_exec", fake_subprocess)
 
     async def scenario():
         record = await manager.start(42)

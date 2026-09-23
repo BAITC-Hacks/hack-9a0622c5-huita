@@ -7,7 +7,7 @@ import secrets
 import httpx
 import pytest
 
-from beesmart.llm import LLMError, PlanningContext, build_context, request_policy
+from beesmart.agent.llm import LLMError, PlanningContext, build_context, request_policy
 
 
 @pytest.fixture
@@ -147,7 +147,7 @@ def test_transport_failure_is_safe_and_never_retried(planning_context, failure, 
 
 
 def test_total_deadline_limits_slow_transport(planning_context, monkeypatch):
-    monkeypatch.setattr("beesmart.llm.REQUEST_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr("beesmart.agent.llm.REQUEST_TIMEOUT_SECONDS", 0.01)
 
     async def handler(_request):
         await asyncio.sleep(1)

@@ -2,9 +2,9 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from beesmart.body_limit import BodyLimitMiddleware
+from beesmart.api.body_limit import BodyLimitMiddleware
 from beesmart.config import Settings
-from beesmart.web import create_app
+from beesmart.api.app import create_app
 
 
 def test_overview_security_and_downloads(tmp_path):

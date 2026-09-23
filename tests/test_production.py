@@ -11,9 +11,9 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from beesmart.api_models import OverviewResponse, RunRecord
+from beesmart.application.contracts import OverviewResponse, RunRecord
 from beesmart.config import LOCAL_HOSTS, Settings
-from beesmart.web import create_app
+from beesmart.api.app import create_app
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -183,9 +183,9 @@ def test_authenticated_upload_worker_uses_external_storage(production_settings, 
     code_root = production_settings.root
     code_root.mkdir()
     shutil.copytree(ROOT / "beesmart", code_root / "beesmart", ignore=shutil.ignore_patterns("__pycache__"))
-    for name in ("agent.py", "environment.py", "mock_environment.py", "scoring_core.py",
-                 "local_eval.py", "make_submission.py", "frozen_policy.json"):
-        shutil.copy2(ROOT / name, code_root / name)
+    shutil.copytree(ROOT / "organizer", code_root / "organizer", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(ROOT / "policies", code_root / "policies")
+    shutil.copy2(ROOT / "agent.py", code_root / "agent.py")
     files = {role: (f"{role}.csv", frame.to_csv(index=False).encode(), "text/csv")
              for role, frame in synthetic_frames.items()}
     with remote_client(production_settings) as client:

@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
-from beesmart.core.domain import CALL_VALUES, DATA_VALUES, load_domain, membership_mask
-from beesmart.core.planner import Planner
+from beesmart.agent.domain import CALL_VALUES, DATA_VALUES, load_domain, membership_mask
+from beesmart.agent.planner import Planner
 
 
 def environment():
