@@ -3,7 +3,6 @@ import shutil
 import time
 from pathlib import Path
 
-import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
@@ -26,32 +25,36 @@ def upload_app(tmp_path):
     return create_app(Settings(root=tmp_path))
 
 
-def source_files(profile=None):
+def source_files(synthetic_frames, profile=None):
     return {
-        "profile": ("../../agent.py", profile or (ROOT / "customer_profile.csv").read_bytes(), "text/csv"),
-        "history": ("history.csv", (ROOT / "data/change_tariff.csv").read_bytes(), "text/csv"),
-        "tariffs": ("tariffs.csv", (ROOT / "data/dict_tariff.csv").read_bytes(), "text/csv"),
+        "profile": ("../../agent.py", synthetic_frames["profile"].to_csv(index=False).encode()
+                    if profile is None else profile, "text/csv"),
+        "history": ("history.csv", synthetic_frames["history"].to_csv(index=False).encode(), "text/csv"),
+        "tariffs": ("tariffs.csv", synthetic_frames["tariffs"].to_csv(index=False).encode(), "text/csv"),
     }
 
 
-def test_upload_runs_on_uploaded_profile_and_exports_result(upload_app, tmp_path):
-    profile = pd.read_csv(ROOT / "customer_profile.csv")
+def test_upload_runs_on_uploaded_profile_and_exports_result(upload_app, tmp_path, synthetic_frames):
+    profile = synthetic_frames["profile"].copy()
+    original_baseline = profile["predicted_arpu"].sum()
     profile["predicted_arpu"] *= 0.5
     payload = profile.to_csv(index=False).encode()
     original_agent = (tmp_path / "agent.py").read_bytes()
     with TestClient(upload_app, client=("127.0.0.1", 50000)) as client:
         # No bundled data exists in this app; uploaded CSV must be sufficient.
-        response = client.post("/api/uploads/run", files=source_files(payload), data={"seed": "42"}, headers=HEADERS)
+        response = client.post("/api/uploads/run", files=source_files(synthetic_frames, payload),
+                               data={"seed": "42"}, headers=HEADERS)
         assert response.status_code == 202, response.text
         record = response.json()
         assert record["dataset"]["source"] == "uploaded"
-        assert record["dataset"]["customers"] == 23441
+        assert record["dataset"]["customers"] == len(profile)
         deadline = time.monotonic() + 20
         while record["status"] in ("queued", "running") and time.monotonic() < deadline:
             time.sleep(0.05)
             record = client.get(f"/api/runs/{record['id']}").json()
         assert record["status"] == "completed", record.get("error")
         assert record["metrics"]["baseline_total_arpu"] == pytest.approx(profile["predicted_arpu"].sum())
+        assert record["metrics"]["baseline_total_arpu"] == pytest.approx(original_baseline * 0.5)
         assert 1 <= len(record["campaigns"]) <= 10
         assert record["metrics"]["n_pilots"] > 0
         assert record["events"]
@@ -62,14 +65,17 @@ def test_upload_runs_on_uploaded_profile_and_exports_result(upload_app, tmp_path
     assert not (tmp_path / "customer_profile.csv").exists()
 
 
-def test_upload_rejects_invalid_inputs_and_releases_reservation(upload_app, tmp_path, monkeypatch):
+def test_upload_rejects_invalid_inputs_and_releases_reservation(upload_app, tmp_path, monkeypatch, synthetic_frames):
     with TestClient(upload_app, client=("127.0.0.1", 50000)) as client:
         assert client.post("/api/uploads/run", json={}, headers=HEADERS).status_code == 415
         files = {"profile": ("a.csv", b"bad,data\n1,2\n")}
         assert client.post("/api/uploads/run", files=files, headers=HEADERS).status_code == 422
-        assert client.post("/api/uploads/run", files=source_files(b"bad,data\n1,2\n"), headers=HEADERS).status_code == 422
-        assert client.post("/api/uploads/run", files=source_files(), data={"seed": "-1"}, headers=HEADERS).status_code == 422
-        assert client.post("/api/uploads/run", files=source_files(), headers={**HEADERS, "Origin": "https://evil.example"}).status_code == 403
+        assert client.post("/api/uploads/run", files=source_files(synthetic_frames, b"bad,data\n1,2\n"),
+                           headers=HEADERS).status_code == 422
+        assert client.post("/api/uploads/run", files=source_files(synthetic_frames),
+                           data={"seed": "-1"}, headers=HEADERS).status_code == 422
+        assert client.post("/api/uploads/run", files=source_files(synthetic_frames),
+                           headers={**HEADERS, "Origin": "https://evil.example"}).status_code == 403
         import beesmart.upload_form as parser
         monkeypatch.setattr(parser, "MAX_UPLOAD_BYTES", 64)
         # No Content-Length: the streamed byte guard must still reject the body.
@@ -89,18 +95,18 @@ def test_reservation_blocks_parallel_runs_and_uploads(tmp_path):
         with pytest.raises(RunBusyError):
             manager.reserve_upload()
         with pytest.raises(RunBusyError):
-            manager.start(42)
+            await manager.start(42)
 
         async def blocked(record):
             await asyncio.Event().wait()
 
         manager._execute = blocked
-        manager.start(42, dataset={"id": "unused"}, from_upload=True)
+        await manager.start(42, dataset={"id": "unused"}, from_upload=True)
         manager.release_upload()
         with pytest.raises(RunBusyError):
             manager.reserve_upload()
         with pytest.raises(RunBusyError):
-            manager.start(43)
+            await manager.start(43)
         await manager.close()
         manager.reserve_upload()
         manager.release_upload()

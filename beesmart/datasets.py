@@ -31,7 +31,8 @@ class DatasetRepository:
     )
 
     def __init__(self, settings: Settings):
-        self.root = settings.root.resolve()
+        self.root = settings.data_path
+        self.code_root = settings.root.resolve()
         self._lock = Lock()
         self._fingerprint = None
         self._summary = None
@@ -60,7 +61,7 @@ class DatasetRepository:
                 self._fingerprint = fingerprint
             result = deepcopy(self._summary)
 
-        missing_runtime = [name for name in self.RUNTIME_FILES if not (self.root / name).is_file()]
+        missing_runtime = [name for name in self.RUNTIME_FILES if not (self.code_root / name).is_file()]
         result["runtime"] = {
             "ready": not missing_runtime and result["dataset"]["status"] == "ready",
             "missing_files": missing_runtime,
@@ -76,6 +77,10 @@ class DatasetRepository:
              "account_balance_usd": None, "runtime_calls": False}
             for key, label in (("openai", "OpenAI"), ("nvidia", "Brev / NVIDIA"))
         ]
+        result["agent"] = {
+            "engine": "local_python", "model": None, "llm_calls": False,
+            "evaluation": "organizer_mock", "paid_calls": False,
+        }
         result["files"] = [
             {"id": key, "name": relative, "bytes": path.stat().st_size,
              "url": f"/api/data/{key}"}
@@ -127,4 +132,3 @@ class DatasetRepository:
         except (ValueError, OSError, KeyError, pd.errors.ParserError):
             empty["dataset"].update(status="error", message="Не удалось проверить CSV: проверьте колонки, ID и ARPU")
             return empty
-

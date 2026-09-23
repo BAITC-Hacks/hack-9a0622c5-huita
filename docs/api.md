@@ -3,11 +3,19 @@
 Backend: Python 3.12+, FastAPI. Frontend: HTML, CSS, JavaScript без Node.js.
 Запуск: `python -m beesmart`; адрес: http://127.0.0.1:8000.
 HTML размещается в `static/index.html`, остальные файлы — в `static/`.
-Все запросы идут на тот же origin. Приложение предназначено для локального тестирования.
+Локально все запросы можно отправлять на тот же origin. В production используются
+HTTPS и `Authorization: Bearer <токен BeeSmart>`. Отдельный frontend-origin разрешается
+через `BEESMART_ALLOWED_ORIGINS`; wildcard запрещён. Доступ внутри одной команды общий.
+
+Машиночитаемый контракт: **[open.json](../open.json)**; живые копии на сервере:
+`/openapi.json` и `/open.json`. Они доступны без авторизации и содержат только схему.
+В `components/schemas` описаны `RunRecord`, `Campaign`, `Metrics`, `OverviewResponse`
+и ошибки. Обновление: `python scripts/export_openapi.py`; CI проверяет соответствие.
 
 | Метод и путь | Ответ |
 |---|---|
 | `GET /api/health` | `{ "status": "ok" }` |
+| `GET /api/agent` | Движок агента, модель, использование LLM и тип оценки |
 | `GET /api/overview` | Профиль данных, сегменты, тарифы, лимиты, доступные CSV |
 | `POST /api/uploads/run` | Загрузить три CSV и автоматически начать расчёт; multipart, ответ 202 |
 | `POST /api/runs` | Начать расчёт; JSON `{ "seed": 42 }`; ответ 202 |
@@ -45,6 +53,14 @@ Seed — целое число от 0 до 4294967295. При активном �
 Лимиты OpenAI и Brev/NVIDIA — по $50, раздельно. `app_spend_usd=0` относится к этому
 приложению; баланс аккаунта не считывается (`account_balance_usd=null`). Сетевых
 вызовов LLM во время `Agent.act` нет. API-ключи не передаются браузеру или worker.
+`GET /api/agent` явно возвращает `engine="local_python"`, `model=null`,
+`llm_calls=false`, `paid_calls=false`, `evaluation="organizer_mock"`.
+
+Production-токен BeeSmart вводит пользователь; храните его только в памяти страницы.
+Не вшивайте токены в HTML/JS, Git, URL или localStorage. Ключи OpenAI/Brev фронтенду
+вообще не нужны. Для GET результатов и скачиваний также нужен заголовок Authorization.
+Для скачивания используйте `fetch` с этим заголовком, затем `response.blob()` и
+`URL.createObjectURL`; после скачивания вызывайте `URL.revokeObjectURL`.
 
 ## Сценарий: загрузить → рассчитать → показать результат
 
@@ -59,7 +75,9 @@ Seed — целое число от 0 до 4294967295. При активном �
 
 Общий размер запроса — до 50 МиБ, передача — до 30 секунд. CSV — UTF-8,
 разделитель запятая, до 128 колонок; схема соответствует исходным файлам организаторов.
-Примеры файлов можно скачать по ссылкам из `GET /api/overview`, поля `files`.
+В чистом клоне CSV отсутствуют. Получите их из локального пакета организаторов.
+Если исходники установлены в приватном `BEESMART_DATA_DIR`, авторизованный клиент
+может скачать их по ссылкам из `GET /api/overview`, поля `files`.
 Пропуски категорий из исходной выдачи допустимы; колонку `predicted_arpu` нужно
 подготовить заранее. Сырые таблицы traffic/arpu_monthly этот маршрут не обрабатывает.
 Нужны ячейка для пилота минимум из 10 абонентов и хотя бы один допустимый
@@ -67,21 +85,24 @@ Seed — целое число от 0 до 4294967295. При активном �
 
 ```javascript
 // profileFile, historyFile, tariffsFile — File из трёх <input type="file">.
-async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress) {
+async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress,
+                            { apiBase = '', accessToken = '' } = {}) {
   const form = new FormData();
   form.append('profile', profileFile);
   form.append('history', historyFile);
   form.append('tariffs', tariffsFile);
   form.append('seed', '42');
-  let response = await fetch('/api/uploads/run', {
-    method: 'POST', headers: { 'X-BeeSmart-Request': '1' }, body: form,
+  const headers = { 'X-BeeSmart-Request': '1' };
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+  let response = await fetch(`${apiBase}/api/uploads/run`, {
+    method: 'POST', headers, body: form,
   });
   let run = await response.json();
   if (!response.ok) throw new Error(run.detail || 'Ошибка загрузки');
   onProgress(run);
   while (run.status === 'queued' || run.status === 'running') {
     await new Promise(resolve => setTimeout(resolve, 1000));
-    response = await fetch(`/api/runs/${run.id}`);
+    response = await fetch(`${apiBase}/api/runs/${run.id}`, { headers });
     const next = await response.json();
     if (!response.ok) throw new Error(next.detail || 'Ошибка получения результата');
     run = next;
@@ -95,6 +116,9 @@ async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress) {
 Отдельный POST `/api/runs` после загрузки не нужен. Ответ 202 означает, что CSV
 прошли проверку и расчёт поставлен в очередь. Пока идёт загрузка или расчёт,
 следующая попытка получает 409; кнопку запуска следует отключить до завершения.
+401 — отсутствует/неверен токен; 429 — временная блокировка после серии ошибок
+авторизации. При перезапуске сервера незавершённый запуск помечается `failed`:
+повторите загрузку. Готовые отчёты сохраняются в постоянном хранилище.
 Ошибки: 400 — некорректный multipart; 408 — таймаут передачи; 413 — превышен
 размер тела; 415 — неверный Content-Type; 422 — поля/seed/содержимое CSV не прошли
 проверку (включая размер отдельного файла); 503 — не удалось сохранить файлы.

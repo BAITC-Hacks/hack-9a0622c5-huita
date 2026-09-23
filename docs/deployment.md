@@ -1,0 +1,101 @@
+# Развёртывание backend
+
+В репозитории находятся код, публичная схема `open.json`, безопасный пример конфигурации и файлы контейнера. Рабочие CSV, загруженные наборы, отчёты и `.env` хранятся на сервере. Текущий вычислительный агент не вызывает OpenAI, Brev или другие платные API.
+
+Docker Engine на машине разработки недоступен: сборка образа, Compose и выдача TLS-сертификата здесь **не запускались**. Ниже — проверяемая конфигурация для отдельного сервера; запуск контейнера и сетевую доступность нужно проверить там. Python-конфигурация и локальные проверки не заменяют контейнерный smoke test.
+
+## Локальная конфигурация
+
+Из корня проекта:
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt -c requirements.lock
+.venv/bin/python scripts/setup_env.py
+.venv/bin/python -m beesmart
+```
+
+`setup_env.py` создаёт `.env` с правами `0600` и случайным токеном. Значение токена не выводится. Повторный запуск сохраняет существующий файл. `.env.example` содержит только пустой токен и безопасные локальные настройки; в Git отправляется именно пример.
+
+`Settings.from_env()` читает `.env` из корня проекта. Уже заданные переменные процесса имеют приоритет над файлом (`override=False`), что позволяет задавать конфигурацию средствами сервера. Приложение использует только перечисленные ниже `BEESMART_*` параметры. [Документация python-dotenv](https://bbc2.github.io/python-dotenv/reference/).
+
+| Переменная | Назначение / значение по умолчанию |
+|---|---|
+| `BEESMART_ENVIRONMENT` | `local` или `production`; по умолчанию `local` |
+| `BEESMART_HOST` | Адрес Uvicorn; локально `127.0.0.1` |
+| `BEESMART_PORT` | Порт 1–65535; по умолчанию `8000` |
+| `BEESMART_API_TOKEN` | Серверный Bearer-токен; в production минимум 32 ASCII-символа без пробелов |
+| `BEESMART_ALLOWED_HOSTS` | Точные имена хостов через запятую, без схемы, путей и `*` |
+| `BEESMART_ALLOWED_ORIGINS` | Точные browser origins через запятую; в production только HTTPS. Пустое значение отключает CORS |
+| `BEESMART_STORAGE_DIR` | Каталог загрузок и отчётов; по умолчанию `<root>/work` |
+| `BEESMART_DATA_DIR` | Каталог исходного набора CSV; по умолчанию `<root>` |
+| `BEESMART_FORWARDED_ALLOW_IPS` | Только точные IP доверенных reverse proxy через запятую; по умолчанию `127.0.0.1` |
+| `BEESMART_LOG_LEVEL` | `critical`, `error`, `warning`, `info`, `debug`; по умолчанию `info` |
+| `BEESMART_DOMAIN` | Только для необязательного Compose-профиля TLS: публичное DNS-имя Caddy |
+
+Пути из переменных разрешаются относительно корня проекта, если они не абсолютные. Пустые `BEESMART_STORAGE_DIR` и `BEESMART_DATA_DIR` сохраняют значения по умолчанию. `OPENAI_API_KEY` и `BREV_API_TOKEN` в примере закомментированы: они не участвуют в текущем агенте.
+
+## Production-настройки
+
+Создайте `.env` на целевом сервере через `setup_env.py`, затем отредактируйте конфигурационные строки:
+
+```dotenv
+BEESMART_ENVIRONMENT=production
+BEESMART_HOST=0.0.0.0
+BEESMART_PORT=8000
+BEESMART_ALLOWED_HOSTS=api.example.com,localhost,127.0.0.1
+BEESMART_ALLOWED_ORIGINS=https://app.example.com
+BEESMART_DOMAIN=api.example.com
+BEESMART_LOG_LEVEL=info
+```
+
+Сохраните сгенерированный `BEESMART_API_TOKEN`. Замените домены на свои; для браузерного клиента на том же origin список `BEESMART_ALLOWED_ORIGINS` можно оставить пустым. В production отсутствие токена, wildcard-hosts, HTTP-origin или wildcard доверенных proxy вызывает ошибку запуска. Ошибка не содержит значение токена.
+
+Токен передаётся через HTTP-заголовок `Authorization: Bearer …`. Его нельзя помещать в URL, статический frontend bundle, схему OpenAPI или Git. Публичная схема не содержит секретов. Общий токен предполагает доверенного оператора; при многопользовательском доступе отдельная идентификация и разграничение пользователей потребуют расширения backend.
+
+## Контейнер и постоянные данные
+
+```bash
+docker compose config --quiet
+docker compose build --pull
+docker compose up -d beesmart
+docker compose ps
+```
+
+Не публикуйте вывод полного `docker compose config`: подстановка переменных может раскрыть токен. Вариант `--quiet` проверяет конфигурацию без вывода значений.
+
+Backend работает как UID/GID `10001:10001`, с файловой системой контейнера только для чтения, отдельным `/tmp`, без Linux capabilities и с лимитами ресурсов. В образ копируется ограниченный список исходников. `.dockerignore` дополнительно исключает `.env`, CSV и локальные артефакты. Рабочий том `beesmart_storage` монтируется в `/var/lib/beesmart`; он должен сохраняться между обновлениями. Поддерживается **одна реплика backend и один worker Uvicorn**: очередь и блокировка одновременных запусков находятся в процессе. [Параметры Docker Compose](https://docs.docker.com/reference/compose-file/services/).
+
+Контейнер не содержит исходных CSV. Их можно загрузить через API тремя отдельными файлами. Если требуется запуск предустановленного набора, администратор отдельно размещает его в постоянном томе:
+
+```text
+/var/lib/beesmart/source/customer_profile.csv
+/var/lib/beesmart/source/data/change_tariff.csv
+/var/lib/beesmart/source/data/dict_tariff.csv
+```
+
+Каталог `/var/lib/beesmart/datasets` содержит загрузки, `/var/lib/beesmart/runs` — сохранённые результаты. Для bind-mount вместо именованного тома заранее выдайте права UID `10001` на каталог хранения. Обновление контейнера сохраняет данные тома; `docker compose down -v` удаляет их и для обычного обновления не используется.
+
+Образы Python и Caddy закреплены по digest многоархитектурных manifest index, полученным из официального Docker Registry. Оба manifest содержат варианты `amd64` и `arm64`. Проверены ссылки на образы; их локальная сборка и запуск ещё не выполнялись. Обновляйте digest после проверки новой версии на сервере. [Рекомендации Docker по закреплению образов](https://docs.docker.com/build/building/best-practices/#pin-base-image-versions).
+
+## HTTPS через Caddy
+
+Перед включением TLS направьте DNS домена на сервер и откройте входящие TCP-порты 80 и 443. Профиль `tls` запускает Caddy перед backend:
+
+```bash
+docker compose --profile tls up -d --build
+```
+
+`deploy/Caddyfile` получает домен из `BEESMART_DOMAIN`. Caddy обслуживает HTTPS и проксирует API, а Uvicorn остаётся недоступным напрямую из внешней сети: опубликованный порт 8000 привязан к loopback сервера. Автоматическая выдача сертификатов зависит от DNS и доступности проверок центра сертификации. [Automatic HTTPS в Caddy](https://caddyserver.com/docs/automatic-https).
+
+Compose задаёт отдельную сеть `172.31.250.0/28`: Caddy получает `172.31.250.2`, backend — `172.31.250.3`. Uvicorn доверяет forwarded-заголовкам только от IP Caddy. Если диапазон конфликтует с сетью сервера, измените подсеть, оба адреса и `BEESMART_FORWARDED_ALLOW_IPS` в Compose согласованно. При другом reverse proxy укажите его точный адрес; `*` не допускается. [Настройки proxy headers Uvicorn](https://www.uvicorn.org/settings/#http).
+
+Том `caddy_data` сохраняет сертификаты и ключи TLS, `caddy_config` — состояние Caddy. Эти тома тоже не входят в Git и резервируются отдельно от кода.
+
+## Проверка после запуска
+
+Проверьте здоровье сервиса и статусы контейнеров, затем выполните авторизованную загрузку трёх CSV через клиент API. Успешная загрузка должна вернуть ID запуска; дождитесь завершения и скачайте отчёт и `submission.csv`. Отдельно убедитесь, что запрос без токена к защищённому API отклоняется, а неизвестный Host и посторонний browser origin не принимаются.
+
+Healthcheck использует `/api/health` внутри контейнера и не передаёт токен. Логи доступа Uvicorn отключены; сообщения приложения и startup/shutdown остаются доступны через `docker compose logs --tail=100 beesmart`. Не добавляйте содержимое `.env`, полные загруженные строки или Authorization-заголовки в диагностические логи.
+
+Для обновления используйте новый проверенный код, пересоберите образ и выполните `docker compose up -d`. Текущий расчёт при перезапуске может прерваться; сохранённая запись сообщает о необходимости повторить запуск. Создавайте резервные копии постоянного тома отдельно от репозитория.

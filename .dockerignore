@@ -1,0 +1,27 @@
+# Nothing enters the build context unless explicitly allowlisted below.
+**
+!Dockerfile
+!requirements.txt
+!requirements.lock
+!agent.py
+!environment.py
+!scoring_core.py
+!mock_environment.py
+!local_eval.py
+!make_submission.py
+!frozen_policy.json
+!open.json
+!beesmart/
+!beesmart/*.py
+!beesmart/core/
+!beesmart/core/*.py
+!static/
+!static/**
+# Defense in depth for nested files, including future static directories.
+**/.env
+**/.env.*
+**/*.csv
+**/*.pem
+**/*.key
+**/__pycache__
+**/*.pyc

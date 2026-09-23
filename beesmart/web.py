@@ -1,15 +1,17 @@
 import asyncio
-import ipaddress
 import json
+import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Security
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.cors import CORSMiddleware
 
 from beesmart.config import Settings
 from beesmart.body_limit import BodyLimitMiddleware
@@ -17,6 +19,9 @@ from beesmart.datasets import DatasetRepository
 from beesmart.runs import RunBusyError, RunManager
 from beesmart.upload_form import MAX_UPLOAD_BYTES, upload_form
 from beesmart.uploads import UploadStore, UploadValidationError
+from beesmart.access import AccessPolicy, bearer
+from beesmart.storage import StorageLease
+from beesmart.api_models import HealthResponse, RunRecord, OverviewResponse, ErrorResponse, AgentInfo
 
 
 class StartRunRequest(BaseModel):
@@ -25,34 +30,56 @@ class StartRunRequest(BaseModel):
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
-    settings = settings or Settings()
+    settings = settings or Settings.from_env()
     repository = DatasetRepository(settings)
-    uploads = UploadStore(settings.root / "work" / "datasets")
+    policy = AccessPolicy(settings)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        app.state.runs = RunManager(settings)
-        yield
-        await app.state.runs.close()
+        lease = StorageLease(settings.storage_path)
+        lease.acquire()
+        try:
+            app.state.uploads = UploadStore(settings.storage_path / "datasets")
+            app.state.runs = RunManager(settings)
+            try:
+                yield
+            finally:
+                await app.state.runs.close()
+        finally:
+            lease.release()
 
-    app = FastAPI(title="BeeSmart API", version="1.1.0", lifespan=lifespan,
+    app = FastAPI(title="BeeSmart API", version="1.2.0", lifespan=lifespan,
+                  description="Загрузка CSV, автоматическое планирование кампаний и локальная оценка. В production требуется Bearer-токен BeeSmart. Расчёты выполняет Python-агент, без LLM-вызовов.",
                   docs_url=None, redoc_url=None)
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.add_middleware(BodyLimitMiddleware, max_bytes=4096)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(settings.allowed_hosts))
+
+    async def api_security(request: Request, credentials=Security(bearer)):
+        policy.check(request)
+
+    async def mutation_header(x_beesmart_request: str = Header(..., pattern="^1$")):
+        """Explicit header in the frontend contract; middleware validates before body parsing."""
+
+    api = APIRouter(dependencies=[Security(api_security)], responses={
+        code: {"model": ErrorResponse} for code in (400, 401, 403, 404, 408, 409, 413, 415, 422, 429, 503)
+    })
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        return JSONResponse({"detail": "Некорректные параметры запроса"}, status_code=422)
 
     @app.middleware("http")
-    async def local_access_and_headers(request: Request, call_next):
+    async def access_and_headers(request: Request, call_next):
         try:
-            loopback = request.client is not None and ipaddress.ip_address(request.client.host).is_loopback
-        except ValueError:
-            loopback = False
-        if not loopback:
-            return JSONResponse({"detail": "Приложение доступно только на этом компьютере"}, status_code=403)
+            policy.check(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                                headers={"Cache-Control": "no-store", **(exc.headers or {})})
         if request.method not in ("GET", "HEAD", "OPTIONS"):
             expected_origin = f"{request.url.scheme}://{request.headers.get('host', '')}"
             origin = request.headers.get("origin")
-            if (origin and origin != expected_origin) or request.headers.get("x-beesmart-request") != "1":
+            if (origin and origin != expected_origin and origin not in settings.allowed_origins) or request.headers.get("x-beesmart-request") != "1":
                 return JSONResponse({"detail": "Запрос должен исходить из приложения"}, status_code=403)
             try:
                 length = int(request.headers.get("content-length", "0"))
@@ -61,7 +88,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             limit = MAX_UPLOAD_BYTES if request.url.path == "/api/uploads/run" else 4096
             if length < 0 or length > limit:
                 return JSONResponse({"detail": "Слишком большой запрос"}, status_code=413)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            logging.getLogger(__name__).error("Request failed (%s)", type(exc).__name__)
+            response = JSONResponse({"detail": "Внутренняя ошибка сервера"}, status_code=500)
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
             "connect-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -69,28 +100,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
+        if settings.environment == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000"
         response.headers["Cache-Control"] = "no-store" if request.url.path.startswith("/api/") else "no-cache"
         return response
 
-    @app.get("/api/health")
+    @app.get("/api/health", response_model=HealthResponse, tags=["System"])
     async def health():
         return {"status": "ok"}
 
-    @app.get("/api/overview")
+    @api.get("/api/overview", response_model=OverviewResponse, tags=["Data"])
     def overview():
         return repository.overview()
 
-    @app.post("/api/runs", status_code=202)
+    @api.get("/api/agent", response_model=AgentInfo, tags=["System"])
+    def agent_info():
+        return {"engine": "local_python", "model": None, "llm_calls": False,
+                "evaluation": "organizer_mock", "paid_calls": False}
+
+    @api.post("/api/runs", status_code=202, response_model=RunRecord, response_model_exclude_unset=True,
+              dependencies=[Depends(mutation_header)], tags=["Runs"])
     async def start_run(body: StartRunRequest, request: Request):
         overview = await asyncio.to_thread(repository.overview)
         if not overview["runtime"]["ready"]:
             raise HTTPException(409, "Для запуска нужны корректные файлы организаторов и агент")
         try:
-            return request.app.state.runs.start(body.seed)
+            return await request.app.state.runs.start(body.seed)
         except RunBusyError:
             raise HTTPException(409, "Расчёт уже идёт. Дождитесь его завершения.") from None
+        except OSError:
+            raise HTTPException(503, "Хранилище запусков недоступно") from None
 
-    @app.post("/api/uploads/run", status_code=202, openapi_extra={
+    @api.post("/api/uploads/run", status_code=202, response_model=RunRecord, response_model_exclude_unset=True,
+              dependencies=[Depends(mutation_header)], tags=["Runs"], openapi_extra={
         "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
             "type": "object", "required": ["profile", "history", "tariffs"],
             "properties": {
@@ -103,6 +145,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     })
     async def upload_and_run(request: Request):
         runs = request.app.state.runs
+        uploads = request.app.state.uploads
         try:
             runs.reserve_upload()
         except RunBusyError:
@@ -122,7 +165,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if isinstance(outcome, dict):
                         await asyncio.to_thread(uploads.discard, outcome["id"])
                     raise
-                return runs.start(seed, dataset=dataset, from_upload=True)
+                return await runs.start(seed, dataset=dataset, from_upload=True)
         except UploadValidationError as exc:
             raise HTTPException(422, str(exc)) from None
         except OSError:
@@ -130,21 +173,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             runs.release_upload()
 
-    @app.get("/api/runs/latest")
+    @api.get("/api/runs/latest", response_model=RunRecord, response_model_exclude_unset=True, tags=["Runs"])
     async def latest(request: Request):
         result = request.app.state.runs.latest()
         if result is None:
             raise HTTPException(404, "Запусков пока нет")
         return result
 
-    @app.get("/api/runs/{run_id}")
+    @api.get("/api/runs/{run_id}", response_model=RunRecord, response_model_exclude_unset=True, tags=["Runs"])
     async def get_run(run_id: UUID, request: Request):
         result = request.app.state.runs.get(str(run_id))
         if result is None:
             raise HTTPException(404, "Запуск не найден")
         return result
 
-    @app.get("/api/runs/{run_id}/submission.csv")
+    @api.get("/api/runs/{run_id}/submission.csv", tags=["Exports"], response_class=Response,
+             responses={200: {"content": {"text/csv": {"schema": {"type": "string"}}}}})
     async def submission(run_id: UUID, request: Request):
         content = request.app.state.runs.submission(str(run_id))
         if content is None:
@@ -153,7 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Content-Disposition": 'attachment; filename="submission.csv"',
         })
 
-    @app.get("/api/runs/{run_id}/report.json")
+    @api.get("/api/runs/{run_id}/report.json", response_model=RunRecord, tags=["Exports"])
     async def report(run_id: UUID, request: Request):
         result = request.app.state.runs.get(str(run_id))
         if result is None:
@@ -163,14 +207,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             "Content-Disposition": 'attachment; filename="beesmart-report.json"',
                         })
 
-    @app.get("/api/data/{file_id}")
+    @api.get("/api/data/{file_id}", tags=["Data"], response_class=FileResponse,
+             responses={200: {"content": {"text/csv": {"schema": {"type": "string", "format": "binary"}}}}})
     def download_data(file_id: str):
         path = repository.file_path(file_id)
         if path is None:
             raise HTTPException(404, "Файл не найден")
         return FileResponse(path, filename=path.name, media_type="text/csv")
 
-    @app.get("/")
+    @app.get("/open.json", include_in_schema=False)
+    async def schema_alias():
+        return JSONResponse(app.openapi())
+
+    @app.get("/", include_in_schema=False)
     async def index():
         path = settings.root / "static" / "index.html"
         if path.is_file():
@@ -178,7 +227,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"service": "BeeSmart backend", "status": "ok", "overview": "/api/overview",
                 "schema": "/openapi.json"}
 
-    app.mount("/static", StaticFiles(directory=settings.root / "static"), name="static")
+    app.include_router(api)
+    app.mount("/static", StaticFiles(directory=settings.root / "static", check_dir=False), name="static")
+    app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins),
+                       allow_methods=["GET", "POST", "OPTIONS"],
+                       allow_headers=["Authorization", "Content-Type", "X-BeeSmart-Request"],
+                       expose_headers=["Content-Disposition"], allow_credentials=False)
     return app
 
 

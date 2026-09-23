@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+if [ -x .venv/bin/python ]; then
+    exec .venv/bin/python scripts/check_repository.py --pre-push
+fi
+exec python3 scripts/check_repository.py --pre-push

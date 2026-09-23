@@ -1,5 +1,4 @@
 import asyncio
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -8,11 +7,8 @@ from beesmart.config import Settings
 from beesmart.web import create_app
 
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_overview_security_and_downloads():
-    with TestClient(create_app(Settings()), client=("127.0.0.1", 50000)) as client:
+def test_overview_security_and_downloads(tmp_path):
+    with TestClient(create_app(Settings(root=tmp_path)), client=("127.0.0.1", 50000)) as client:
         health = client.get("/api/health")
         assert health.status_code == 200
         assert health.json() == {"status": "ok"}
@@ -20,6 +16,7 @@ def test_overview_security_and_downloads():
         overview = client.get("/api/overview")
         assert overview.status_code == 200
         assert overview.json()["limits"]["max_total_contacts"] == 15000
+        assert overview.json()["dataset"]["status"] == "missing"
         assert client.get("/api/data/not-a-source").status_code == 404
         assert client.get("/api/runs/not-a-uuid").status_code == 422
         assert client.post("/api/runs", json={"seed": 42}).status_code == 403
@@ -30,8 +27,8 @@ def test_overview_security_and_downloads():
         assert client.post("/api/runs", content=b"x" * 5000, headers=headers).status_code == 413
 
 
-def test_remote_client_denied():
-    with TestClient(create_app(Settings()), client=("192.0.2.10", 50000)) as client:
+def test_remote_client_denied(tmp_path):
+    with TestClient(create_app(Settings(root=tmp_path)), client=("192.0.2.10", 50000)) as client:
         assert client.get("/api/overview").status_code == 403
 
 
@@ -72,4 +69,3 @@ def test_body_limit_checks_actual_chunked_bytes():
         assert sent[0]["status"] == 413
 
     asyncio.run(scenario())
-

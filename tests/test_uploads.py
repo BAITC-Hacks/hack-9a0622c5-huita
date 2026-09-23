@@ -169,6 +169,6 @@ def test_original_organizer_csvs_pass_when_present(tmp_path):
     finally:
         for handle in handles.values():
             handle.close()
-    assert metadata["customers"] == 23441
-    assert metadata["history_rows"] == 14823
-    assert metadata["tariffs"] == 21
+    assert metadata["customers"] == len(pd.read_csv(root / FILENAMES["profile"]))
+    assert metadata["history_rows"] == len(pd.read_csv(root / FILENAMES["history"]))
+    assert metadata["tariffs"] == len(pd.read_csv(root / FILENAMES["tariffs"]))

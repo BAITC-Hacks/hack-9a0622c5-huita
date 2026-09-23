@@ -2,13 +2,15 @@ import asyncio
 import csv
 import io
 import json
+import logging
 import os
 import sys
 import time
 from collections import OrderedDict
+from contextlib import suppress
 from copy import deepcopy
 from datetime import datetime, timezone
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from beesmart.config import Settings
 
@@ -36,10 +38,11 @@ class RunManager:
         self._active: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
         self._upload_reserved = False
+        self._starting = False
         self._load_reports()
 
     def _load_reports(self) -> None:
-        folder = self.settings.root / "work" / "runs"
+        folder = self.settings.storage_path / "runs"
         if not folder.exists():
             return
         paths = sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime)[-self.settings.retained_runs:]
@@ -48,36 +51,84 @@ class RunManager:
                 continue
             try:
                 record = json.loads(path.read_text())
-                from uuid import UUID
-                if str(UUID(record["id"])) == path.stem and record["status"] in ("completed", "failed"):
+                if str(UUID(record["id"])) == path.stem and record["status"] in ("queued", "running", "completed", "failed"):
+                    record.setdefault("dataset", {"source": "bundled"})
+                    if record["status"] in ("queued", "running"):
+                        record.update(status="failed", error="Сервер перезапущен. Загрузите данные и повторите расчёт.", finished_at=timestamp())
+                        self._save_report(record)
                     self._runs[record["id"]] = record
             except (ValueError, KeyError, OSError, TypeError):
                 continue
 
     def reserve_upload(self) -> None:
-        if self._upload_reserved or (self._active is not None and not self._active.done()):
+        if self._upload_reserved or self._starting or (self._active is not None and not self._active.done()):
             raise RunBusyError
         self._upload_reserved = True
 
     def release_upload(self) -> None:
         self._upload_reserved = False
 
-    def start(self, seed: int, *, dataset: dict | None = None, from_upload: bool = False) -> dict:
-        if ((self._upload_reserved and not from_upload)
+    async def start(self, seed: int, *, dataset: dict | None = None, from_upload: bool = False) -> dict:
+        if (self._starting or (self._upload_reserved and not from_upload)
                 or (self._active is not None and not self._active.done())):
             raise RunBusyError
-        run_id = str(uuid4())
-        record = {
-            "id": run_id, "status": "queued", "seed": seed, "created_at": timestamp(),
-            "finished_at": None, "duration_seconds": None, "error": None,
-            "campaigns": [], "metrics": None, "events": [], "diagnostics": {},
-            "dataset": {"source": "uploaded", **dataset} if dataset else {"source": "bundled"},
-        }
-        self._runs[run_id] = record
+        # Reservation must precede the first yield, including the disk write.
+        # Worker creation stays on this event loop and follows durable queuing.
+        self._starting = True
+        try:
+            run_id = str(uuid4())
+            record = {
+                "id": run_id, "status": "queued", "seed": seed, "created_at": timestamp(),
+                "finished_at": None, "duration_seconds": None, "error": None,
+                "campaigns": [], "metrics": None, "events": [], "diagnostics": {},
+                "dataset": {"source": "uploaded", **dataset} if dataset else {"source": "bundled"},
+            }
+            persistence = asyncio.create_task(asyncio.to_thread(self._save_report, deepcopy(record)))
+            try:
+                await asyncio.shield(persistence)
+            except asyncio.CancelledError:
+                # Cancellation cannot stop an already-running file thread. Wait
+                # before replacing the queued record, so it cannot overwrite a
+                # later failed status. Never launch a worker for this request.
+                try:
+                    await self._finish_persistence(persistence)
+                except OSError:
+                    logging.getLogger(__name__).error("Canceled run could not finish its initial report write")
+                record.update(status="failed", finished_at=timestamp(), duration_seconds=0.0,
+                              error="Запуск отменён до начала расчёта. Повторите запрос.")
+                cancellation_report = asyncio.create_task(asyncio.to_thread(self._save_report, deepcopy(record)))
+                try:
+                    await self._finish_persistence(cancellation_report)
+                except OSError:
+                    logging.getLogger(__name__).error("Canceled run could not persist its failed status")
+                    # If storage is unavailable, remove a surviving queued
+                    # record rather than leave it looking ready to execute.
+                    cleanup = asyncio.create_task(asyncio.to_thread(
+                        (self.settings.storage_path / "runs" / f"{run_id}.json").unlink, missing_ok=True))
+                    with suppress(OSError):
+                        await self._finish_persistence(cleanup)
+                self._remember(record)
+                raise
+            self._remember(record)
+            self._active = asyncio.create_task(self._execute(record))
+            return deepcopy(record)
+        finally:
+            self._starting = False
+
+    def _remember(self, record: dict) -> None:
+        self._runs[record["id"]] = record
         while len(self._runs) > self.settings.retained_runs:
             self._runs.popitem(last=False)
-        self._active = asyncio.create_task(self._execute(record))
-        return deepcopy(record)
+
+    @staticmethod
+    async def _finish_persistence(task: asyncio.Task):
+        """Complete cancellation cleanup even if the caller is canceled twice."""
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done():
+                    return task.result()
 
     def get(self, run_id: str) -> dict | None:
         record = self._runs.get(run_id)
@@ -105,9 +156,10 @@ class RunManager:
             environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if key in os.environ}
             environment.update(PYTHONUNBUFFERED="1", PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1",
                                OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
-            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"])]
+            data_path = self.settings.data_path
             if record["dataset"]["source"] == "uploaded":
-                arguments.append(record["dataset"]["id"])
+                data_path = self.settings.storage_path / "datasets" / UUID(record["dataset"]["id"]).hex
+            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"]), "--data-dir", str(data_path)]
             process = await asyncio.create_subprocess_exec(
                 *arguments,
                 cwd=self.settings.root, env=environment,
@@ -142,21 +194,30 @@ class RunManager:
             self._process = None
             record["finished_at"] = timestamp()
             record["duration_seconds"] = round(time.perf_counter() - started, 3)
-            await asyncio.to_thread(self._save_report, deepcopy(record))
+            try:
+                await asyncio.to_thread(self._save_report, deepcopy(record))
+            except OSError:
+                logging.getLogger(__name__).error("Run report could not be persisted; check storage availability")
+                record["error"] = "Результат рассчитан, но отчёт не сохранён. Скачайте его до перезапуска сервера."
 
     def _save_report(self, record: dict) -> None:
+        folder = self.settings.storage_path / "runs"
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path = folder / f"{record['id']}.json"
+        temporary = path.with_suffix(".tmp")
         try:
-            folder = self.settings.root / "work" / "runs"
-            folder.mkdir(parents=True, exist_ok=True)
-            path = folder / f"{record['id']}.json"
-            temporary = path.with_suffix(".tmp")
-            temporary.write_text(json.dumps(record, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+                output.write(json.dumps(record, ensure_ascii=False, allow_nan=False))
+                output.flush()
+                os.fsync(output.fileno())
             temporary.replace(path)
-            for old in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime)[:-self.settings.retained_runs]:
-                old.unlink()
-        except (OSError, ValueError):
-            # Audit persistence cannot change an already computed campaign plan.
-            pass
+        except BaseException:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+            raise
+        for old in sorted(folder.glob("*.json"), key=lambda p: p.stat().st_mtime)[:-self.settings.retained_runs]:
+            old.unlink()
 
     async def close(self) -> None:
         if self._active is not None and not self._active.done():

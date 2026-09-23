@@ -1,10 +1,10 @@
 """Separate evaluation process. Only the official runner can see mock internals."""
 import contextlib
+import argparse
 import json
 import os
 import sys
 from pathlib import Path
-from uuid import UUID
 
 from beesmart.serialization import json_safe
 
@@ -12,13 +12,13 @@ from beesmart.serialization import json_safe
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
-    seed = int(sys.argv[1])
-    dataset_root = root
-    if len(sys.argv) > 2:
-        dataset_id = UUID(sys.argv[2]).hex
-        dataset_root = (root / "work" / "datasets" / dataset_id).resolve()
-        if not dataset_root.is_relative_to((root / "work" / "datasets").resolve()):
-            raise ValueError("Invalid dataset directory")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("seed", type=int)
+    parser.add_argument("--data-dir", type=Path, default=root)
+    args = parser.parse_args()
+    seed = args.seed
+    # This path is supplied only by the server, never accepted from an HTTP request.
+    dataset_root = args.data_dir.resolve()
     protocol_stdout = sys.stdout
 
     def send(kind: str, data: dict) -> None:
