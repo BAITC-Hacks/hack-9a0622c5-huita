@@ -29,11 +29,33 @@ class HealthResponse(ApiResponse):
 
 
 class AgentInfo(ApiResponse):
-    engine: Literal["local_python"]
+    engine: Literal["local_python", "openai_python"]
     model: str | None
     llm_calls: bool
     evaluation: Literal["organizer_mock"]
     paid_calls: bool
+    provider: Literal["local", "openai"] = "local"
+    ready: bool = True
+    status: Literal["disabled", "ready", "needs_configuration", "storage_error"] = "disabled"
+    budget_usd: float = Field(default=5.0, ge=0)
+    estimated_spend_usd: float = Field(default=0.0, ge=0)
+    reserved_usd: float = Field(default=0.0, ge=0)
+    request_attempts: int = Field(default=0, ge=0)
+    completed_requests: int = Field(default=0, ge=0)
+
+
+class LLMRunInfo(ApiResponse):
+    provider: Literal["local", "openai"]
+    model: str | None
+    status: Literal["disabled", "pending", "planning", "cached", "completed", "failed"]
+    cache_hit: bool
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    estimated_cost_usd: float = Field(ge=0)
+    reserved_usd: float = Field(ge=0)
+    summary: str = Field(max_length=1000, description="Untrusted model text; render with textContent, never innerHTML. Hypothesis rationale, not a measured result.")
+    hypotheses: int = Field(ge=0, le=14)
+    error_code: str | None
 
 
 class DatasetRef(ApiResponse):
@@ -106,6 +128,7 @@ class RunRecord(ApiResponse):
     campaigns: list[Campaign]
     metrics: Metrics | None
     diagnostics: dict[str, JsonValue]
+    llm: LLMRunInfo | None = None
 
 
 class DatasetQuality(ApiResponse):

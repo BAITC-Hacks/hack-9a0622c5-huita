@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from beesmart.config import Settings
+from beesmart.intelligence import IntelligenceService
+from beesmart.llm import LLMError
 
 
 CAMPAIGN_COLUMNS = [
@@ -34,6 +36,7 @@ class RunManager:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self.intelligence = IntelligenceService(settings)
         self._runs: OrderedDict[str, dict] = OrderedDict()
         self._active: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
@@ -55,12 +58,15 @@ class RunManager:
                     record.setdefault("dataset", {"source": "bundled"})
                     if record["status"] in ("queued", "running"):
                         record.update(status="failed", error="Сервер перезапущен. Загрузите данные и повторите расчёт.", finished_at=timestamp())
+                        if isinstance(record.get("llm"), dict) and record["llm"].get("status") in ("pending", "planning"):
+                            record["llm"].update(status="failed", error_code="interrupted")
                         self._save_report(record)
                     self._runs[record["id"]] = record
             except (ValueError, KeyError, OSError, TypeError):
                 continue
 
     def reserve_upload(self) -> None:
+        self.intelligence.check_ready()
         if self._upload_reserved or self._starting or (self._active is not None and not self._active.done()):
             raise RunBusyError
         self._upload_reserved = True
@@ -69,6 +75,7 @@ class RunManager:
         self._upload_reserved = False
 
     async def start(self, seed: int, *, dataset: dict | None = None, from_upload: bool = False) -> dict:
+        self.intelligence.check_ready()
         if (self._starting or (self._upload_reserved and not from_upload)
                 or (self._active is not None and not self._active.done())):
             raise RunBusyError
@@ -81,6 +88,7 @@ class RunManager:
                 "id": run_id, "status": "queued", "seed": seed, "created_at": timestamp(),
                 "finished_at": None, "duration_seconds": None, "error": None,
                 "campaigns": [], "metrics": None, "events": [], "diagnostics": {},
+                "llm": self.intelligence.initial_record(),
                 "dataset": {"source": "uploaded", **dataset} if dataset else {"source": "bundled"},
             }
             persistence = asyncio.create_task(asyncio.to_thread(self._save_report, deepcopy(record)))
@@ -159,7 +167,16 @@ class RunManager:
             data_path = self.settings.data_path
             if record["dataset"]["source"] == "uploaded":
                 data_path = self.settings.storage_path / "datasets" / UUID(record["dataset"]["id"]).hex
-            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"]), "--data-dir", str(data_path)]
+            if self.settings.agent_provider == "openai":
+                record["events"].append({"event": "agent_planning", "data": {
+                    "provider": "openai", "model": self.settings.openai_model}})
+            async with asyncio.timeout(self.settings.run_timeout_seconds):
+                policy_path = await self.intelligence.prepare(data_path, record["llm"])
+            if self.settings.agent_provider == "openai":
+                record["events"].append({"event": "agent_policy_ready", "data": {
+                    "cache_hit": record["llm"]["cache_hit"], "hypotheses": record["llm"]["hypotheses"]}})
+            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"]),
+                         "--data-dir", str(data_path), "--policy-path", str(policy_path)]
             process = await asyncio.create_subprocess_exec(
                 *arguments,
                 cwd=self.settings.root, env=environment,
@@ -168,7 +185,7 @@ class RunManager:
             )
             self._process = process
             result = None
-            async with asyncio.timeout(self.settings.run_timeout_seconds):
+            async with asyncio.timeout(max(0.001, self.settings.run_timeout_seconds - (time.perf_counter() - started))):
                 while line := await process.stdout.readline():
                     message = json.loads(line)
                     if message.get("type") == "event" and len(record["events"]) < self.settings.max_events:
@@ -180,6 +197,9 @@ class RunManager:
                 raise RuntimeError("Worker did not produce a valid result")
             record.update(result)
             record["status"] = "completed"
+        except LLMError as exc:
+            record.update(status="failed", error=str(exc))
+            record["llm"].update(status="failed", error_code=exc.code)
         except TimeoutError:
             record.update(status="failed", error="Расчёт остановлен: превышен лимит времени.")
         except asyncio.CancelledError:
@@ -187,7 +207,12 @@ class RunManager:
             raise
         except (OSError, ValueError, KeyError, RuntimeError):
             record.update(status="failed", error="Расчёт не завершён. Проверьте данные командой python local_eval.py.")
+        except Exception as exc:
+            logging.getLogger(__name__).error("Run failed (%s)", type(exc).__name__)
+            record.update(status="failed", error="Расчёт остановлен из-за внутренней ошибки; повторите после проверки сервера.")
         finally:
+            if record["status"] == "failed" and record["llm"]["status"] in ("pending", "planning"):
+                record["llm"].update(status="failed", error_code="interrupted")
             if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()

@@ -66,16 +66,17 @@ class CampaignAgent:
             if not validation["ok"]:
                 final_plan = planner.fallback(stats, ledger, budget, contacts)
                 validation = planner.validate(final_plan.campaigns(), budget, contacts)
-            self.emit("plan_selected", {"campaigns": detailed_plan(final_plan),
-                      "gain_low": final_plan.gain_low, "cost": final_plan.cost,
-                      "contacts": final_plan.contacts, "fallback": final_plan.fallback,
-                      "weight": final_plan.weight, "validation": validation})
+            if self.event_sink is not None:
+                self.emit("plan_selected", {"campaigns": detailed_plan(final_plan),
+                          "gain_low": final_plan.gain_low, "cost": final_plan.cost,
+                          "contacts": final_plan.contacts, "fallback": final_plan.fallback,
+                          "weight": final_plan.weight, "validation": validation})
 
         def pilot_size_channel(arm):
             budget, contacts = balances()
             # On depleted/custom environments preserve room for one legal final
             # segment. With the official 15,000 contacts this does not reduce n.
-            minimum_final = min((s.n for s in domain.segments), default=contacts)
+            minimum_final = planner.minimum_segment_size if planner.minimum_segment_size is not None else contacts
             n = min(200, domain.cells[arm[:2]].n, max(0, contacts - minimum_final))
             if n < 10:
                 return None
@@ -179,8 +180,8 @@ class CampaignAgent:
                     # campaign's full cost and size AFTER all k pilot expenses.
                     # Compare only whole feasible segments and deduct its cost.
                     futures = []
-                    for segment in domain.segments:
-                        if segment.cell != arm[:2] or segment.n > contacts - pilot_contacts:
+                    for segment in planner.segments_by_cell.get(arm[:2], []):
+                        if segment.n > contacts - pilot_contacts:
                             continue
                         final_cost = segment.n * sms.cost
                         if final_cost > budget - pilot_cost:

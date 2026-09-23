@@ -2,24 +2,29 @@
 
 from math import isfinite
 
-from .domain import ARPU_VALUES, CALL_VALUES, DATA_VALUES, Domain
+from .domain import ARPU_VALUES, CALL_VALUES, DATA_VALUES, Domain, membership_mask
 from .models import ArmStats, Candidate, Plan
 
 
 class Planner:
     def __init__(self, domain: Domain):
         self.domain = domain
+        self.segments_by_cell = {}
+        for segment in domain.segments:
+            self.segments_by_cell.setdefault(segment.cell, []).append(segment)
+        self.minimum_segment_size = min((s.n for s in domain.segments), default=None)
+        # Validation has its own filter index, derived from the private stable
+        # profile snapshot. It deliberately does not trust candidate masks.
+        self._validation_filters = {}
+        self._all_rows = (1 << len(domain.profile)) - 1
 
     def candidates(self, stats: dict, ledger: dict, budget: float, contacts: int) -> list[Candidate]:
         result = []
-        by_cell = {}
-        for segment in self.domain.segments:
-            by_cell.setdefault(segment.cell, []).append(segment)
         for arm, observation in sorted(stats.items()):
             lower = observation.estimate().lower
             if lower <= 0:
                 continue
-            for segment in by_cell.get(arm[:2], []):
+            for segment in self.segments_by_cell.get(arm[:2], []):
                 if segment.n > contacts:
                     continue
                 fresh = segment.fresh_arpu(ledger.get(arm[:2], 0))
@@ -66,12 +71,16 @@ class Planner:
         possibilities = []
         arms = sorted(stats)
         if not arms:
-            arms = [cell + (target,) for cell in sorted(self.domain.cells)
-                    for target in self.domain.tariffs if target != cell[0]]
+            # Without observations every target has the same loss/size. The
+            # canonical tie-break always chooses the first allowed target, so
+            # materializing every tariff would repeat an identical comparison.
+            arms = [cell + (next(target for target in self.domain.tariffs if target != cell[0]),)
+                    for cell in sorted(self.domain.cells)
+                    if any(target != cell[0] for target in self.domain.tariffs)]
         for arm in arms:
             lower = stats[arm].estimate().lower if arm in stats else 0.0
-            for segment in self.domain.segments:
-                if segment.cell != arm[:2] or segment.n > contacts or segment.n * push.cost > budget:
+            for segment in self.segments_by_cell.get(arm[:2], []):
+                if segment.n > contacts or segment.n * push.cost > budget:
                     continue
                 loss = max(0.0, -push.multiplier * lower) * segment.arpu_sum
                 fresh = segment.fresh_arpu(ledger.get(segment.cell, 0))
@@ -87,7 +96,7 @@ class Planner:
 
     def validate(self, campaigns: list[dict], budget: float, contacts: int) -> dict:
         """Reapply actual filters, rather than trusting cached candidate masks."""
-        errors, union, cost, count = [], set(), 0.0, 0
+        errors, union, cost, count = [], 0, 0.0, 0
         if not 1 <= len(campaigns) <= 10:
             errors.append("campaign_count")
         allowed = {"campaign_name", "target_tariff", "channel", "filter_current_tariff",
@@ -111,21 +120,26 @@ class Planner:
             if channel is None:
                 errors.append(prefix + "channel")
                 continue
-            rows = self.domain.profile
+            selected = self._all_rows
             for field in ("current_tariff", "arpu_segment", "data_segment", "call_segment"):
                 if f"filter_{field}" in campaign:
-                    rows = rows[rows[field] == campaign[f"filter_{field}"]]
-            selected = set(int(i) for i in rows.index)
-            if not 0 < len(selected) <= 5000:
+                    value = campaign[f"filter_{field}"]
+                    key = (field, value)
+                    if key not in self._validation_filters:
+                        matches = self.domain.profile[field].eq(value).fillna(False).to_numpy(dtype=bool)
+                        self._validation_filters[key] = membership_mask(matches)
+                    selected &= self._validation_filters[key]
+            selected_count = selected.bit_count()
+            if not 0 < selected_count <= 5000:
                 errors.append(prefix + "segment_size")
             if selected & union:
                 errors.append(prefix + "overlap")
-            union.update(selected)
-            count += len(selected)
-            cost += len(selected) * channel.cost
+            union |= selected
+            count += selected_count
+            cost += selected_count * channel.cost
         if count > contacts:
             errors.append("contact_budget")
         if not isfinite(cost) or cost > budget:
             errors.append("money_budget")
         return {"ok": not errors, "errors": errors, "final_contacts": count, "final_cost": cost,
-                "overlap_count": count - len(union), "cap_flags": [] if not errors else errors.copy()}
+                "overlap_count": count - union.bit_count(), "cap_flags": [] if not errors else errors.copy()}

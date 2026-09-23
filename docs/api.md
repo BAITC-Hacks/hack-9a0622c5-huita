@@ -9,7 +9,7 @@ HTTPS и `Authorization: Bearer <токен BeeSmart>`. Отдельный front
 
 Машиночитаемый контракт: **[open.json](../open.json)**; живые копии на сервере:
 `/openapi.json` и `/open.json`. Они доступны без авторизации и содержат только схему.
-В `components/schemas` описаны `RunRecord`, `Campaign`, `Metrics`, `OverviewResponse`
+В `components/schemas` описаны `RunRecord`, `LLMRunInfo`, `AgentInfo`, `Campaign`, `Metrics`, `OverviewResponse`
 и ошибки. Обновление: `python scripts/export_openapi.py`; CI проверяет соответствие.
 
 | Метод и путь | Ответ |
@@ -33,7 +33,7 @@ Seed — целое число от 0 до 4294967295. При активном �
 только при первых двух статусах, примерно раз в секунду. При скрытой вкладке опрос
 можно остановить. `error` содержит сообщение для пользователя.
 
-Поля запуска: `id`, `seed`, `status`, `dataset`, `created_at`, `finished_at`, `duration_seconds`,
+Поля запуска: `id`, `seed`, `status`, `dataset`, `llm`, `created_at`, `finished_at`, `duration_seconds`,
 `events`, `campaigns`, `metrics`, `diagnostics`, `error`. Событие: `{event, data}`.
 Пилоты приходят как `event="pilot_result"`. Метрики появляются после официального
 локального scorer: `net_arpu_gain`, `gross_arpu_lift`, `total_cost`, `total_contacts`,
@@ -46,15 +46,55 @@ Seed — целое число от 0 до 4294967295. При активном �
 `diagnostics.gain_low` — оценка приращения финального плана, а не результат scorer.
 
 В overview: `project`, `limits`, `dataset`, `runtime`, `segments`, `tariffs`,
-`providers`, `files`. `runtime.ready=false` означает, что отсутствуют необходимые
-данные/модули. Исходники и синтетические данные — оригинальная выдача организаторов.
+`providers`, `files`, `agent`. `runtime.ready=false` означает, что отсутствуют необходимые
+данные/модули. Готовность провайдера проверяется отдельно в `agent.ready`.
+Исходники и синтетические данные — оригинальная выдача организаторов.
 Эффекты mock отличаются от скрытого судейства; результат UI не является будущим баллом.
 
-Лимиты OpenAI и Brev/NVIDIA — по $50, раздельно. `app_spend_usd=0` относится к этому
-приложению; баланс аккаунта не считывается (`account_balance_usd=null`). Сетевых
-вызовов LLM во время `Agent.act` нет. API-ключи не передаются браузеру или worker.
-`GET /api/agent` явно возвращает `engine="local_python"`, `model=null`,
-`llm_calls=false`, `paid_calls=false`, `evaluation="organizer_mock"`.
+Лимиты OpenAI и Brev/NVIDIA — по $50, раздельно. `providers[].app_spend_usd` относится
+только к оценке расходов этого приложения; баланс аккаунта не считывается
+(`account_balance_usd=null`). Brev/NVIDIA в текущем расчёте не используется.
+Сетевых вызовов LLM во время `Agent.act` нет: при выборе OpenAI подготовка политики
+происходит до запуска worker. API-ключи не передаются браузеру или worker.
+
+## Состояние агента и этап OpenAI
+
+`GET /api/agent` и `overview.agent` возвращают одинаковый `AgentInfo`:
+
+| Поля | Значение |
+|---|---|
+| `provider`, `engine` | `local` / `local_python` или `openai` / `openai_python` |
+| `model` | `null` в локальном режиме, `gpt-6-luna` при OpenAI |
+| `llm_calls`, `paid_calls` | Включён ли режим LLM и разрешены ли платные вызовы по текущей конфигурации |
+| `evaluation` | Всегда `organizer_mock` |
+| `ready`, `status` | `disabled`, `ready`, `needs_configuration` или `storage_error` |
+| `budget_usd` | Лимит приложения, по умолчанию $5, максимум $50 |
+| `estimated_spend_usd`, `reserved_usd` | Учтённая оценка расходов и незакрытые резервы |
+| `request_attempts`, `completed_requests` | Попытки с резервированием и успешно принятые ответы |
+
+Это сведения о конфигурации и локальном журнале. `ready=true` не подтверждает
+доступ аккаунта к модели или достаточную внешнюю квоту. Без ключа в режиме OpenAI
+запуск возвращает 503; автоматического перехода на локальный алгоритм нет.
+
+В новых запусках `run.llm` содержит `provider`, `model`, `status`, `cache_hit`,
+`input_tokens`, `output_tokens`, `estimated_cost_usd`, `reserved_usd`, `summary`,
+`hypotheses`, `error_code`. Старые сохранённые отчёты могут не содержать этого поля.
+Статусы этапа: `disabled`, `pending`, `planning`, `cached`, `completed`, `failed`.
+`run.status` описывает весь запуск, а `run.llm.status` — только подготовку политики.
+После завершения LLM весь запуск ещё может находиться в `running` во время пилотов.
+
+| Событие | `data` |
+|---|---|
+| `agent_planning` | `{provider:"openai", model:"gpt-6-luna"}` |
+| `agent_policy_ready` | `{cache_hit:boolean, hypotheses:number}` |
+| `pilot_result` | Результат очередного пилота после подготовки политики |
+
+При попадании в кэш новый запрос не выполняется: `cache_hit=true`, токены и стоимость
+текущего обращения равны нулю. При неуспешной попытке резерв $0.02 может остаться,
+поскольку расход провайдера неизвестен. `summary` — недоверенное модельное обоснование
+до 1000 символов; вставляйте через `textContent` и подписывайте как обоснование гипотез.
+Показатели доходности берите из `metrics` после scorer. Настройки, приватность,
+кэш и коды ошибок описаны в [руководстве агента](agent.md).
 
 Production-токен BeeSmart вводит пользователь; храните его только в памяти страницы.
 Не вшивайте токены в HTML/JS, Git, URL или localStorage. Ключи OpenAI/Brev фронтенду
@@ -121,7 +161,8 @@ async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress,
 повторите загрузку. Готовые отчёты сохраняются в постоянном хранилище.
 Ошибки: 400 — некорректный multipart; 408 — таймаут передачи; 413 — превышен
 размер тела; 415 — неверный Content-Type; 422 — поля/seed/содержимое CSV не прошли
-проверку (включая размер отдельного файла); 503 — не удалось сохранить файлы.
+проверку (включая размер отдельного файла); 503 — провайдер не настроен, недоступен
+журнал расходов или не удалось сохранить файлы.
 Сообщение пользователю находится в `detail`.
 
 У загруженного запуска `dataset={source:"uploaded",id,customers,history_rows,tariffs}`.
@@ -133,5 +174,7 @@ async function uploadAndRun(profileFile, historyFile, tariffsFile, onProgress,
 
 Каждая загрузка получает свой каталог с фиксированными именами CSV. Имя файла
 клиента не используется как путь. Сохраняются последние 5 наборов и 20 отчётов
-локально в `work/`; эти файлы не попадают в Git. Загружаемый набор использует
+в `BEESMART_STORAGE_DIR` (по умолчанию `work/`); эти файлы не попадают в Git.
+Проверенные LLM-политики и журнал расходов находятся там же в `llm/`.
+Загружаемый набор использует
 официальную локальную mock-среду: показанный эффект — результат симуляции.

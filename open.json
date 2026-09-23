@@ -4,10 +4,31 @@
       "AgentInfo": {
         "additionalProperties": false,
         "properties": {
+          "budget_usd": {
+            "default": 5.0,
+            "minimum": 0.0,
+            "title": "Budget Usd",
+            "type": "number"
+          },
+          "completed_requests": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Completed Requests",
+            "type": "integer"
+          },
           "engine": {
-            "const": "local_python",
+            "enum": [
+              "local_python",
+              "openai_python"
+            ],
             "title": "Engine",
             "type": "string"
+          },
+          "estimated_spend_usd": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Estimated Spend Usd",
+            "type": "number"
           },
           "evaluation": {
             "const": "organizer_mock",
@@ -32,6 +53,43 @@
           "paid_calls": {
             "title": "Paid Calls",
             "type": "boolean"
+          },
+          "provider": {
+            "default": "local",
+            "enum": [
+              "local",
+              "openai"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "ready": {
+            "default": true,
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "request_attempts": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Request Attempts",
+            "type": "integer"
+          },
+          "reserved_usd": {
+            "default": 0.0,
+            "minimum": 0.0,
+            "title": "Reserved Usd",
+            "type": "number"
+          },
+          "status": {
+            "default": "disabled",
+            "enum": [
+              "disabled",
+              "ready",
+              "needs_configuration",
+              "storage_error"
+            ],
+            "title": "Status",
+            "type": "string"
           }
         },
         "required": [
@@ -451,6 +509,104 @@
         "type": "object"
       },
       "JsonValue": {},
+      "LLMRunInfo": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_hit": {
+            "title": "Cache Hit",
+            "type": "boolean"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "estimated_cost_usd": {
+            "minimum": 0.0,
+            "title": "Estimated Cost Usd",
+            "type": "number"
+          },
+          "hypotheses": {
+            "maximum": 14.0,
+            "minimum": 0.0,
+            "title": "Hypotheses",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "minimum": 0.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "output_tokens": {
+            "minimum": 0.0,
+            "title": "Output Tokens",
+            "type": "integer"
+          },
+          "provider": {
+            "enum": [
+              "local",
+              "openai"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "reserved_usd": {
+            "minimum": 0.0,
+            "title": "Reserved Usd",
+            "type": "number"
+          },
+          "status": {
+            "enum": [
+              "disabled",
+              "pending",
+              "planning",
+              "cached",
+              "completed",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Untrusted model text; render with textContent, never innerHTML. Hypothesis rationale, not a measured result.",
+            "maxLength": 1000,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "model",
+          "status",
+          "cache_hit",
+          "input_tokens",
+          "output_tokens",
+          "estimated_cost_usd",
+          "reserved_usd",
+          "summary",
+          "hypotheses",
+          "error_code"
+        ],
+        "title": "LLMRunInfo",
+        "type": "object"
+      },
       "LimitsInfo": {
         "additionalProperties": false,
         "properties": {
@@ -816,6 +972,16 @@
             "title": "Id",
             "type": "string"
           },
+          "llm": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LLMRunInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "metrics": {
             "anyOf": [
               {
@@ -1016,9 +1182,9 @@
     }
   },
   "info": {
-    "description": "Загрузка CSV, автоматическое планирование кампаний и локальная оценка. В production требуется Bearer-токен BeeSmart. Расчёты выполняет Python-агент, без LLM-вызовов.",
+    "description": "Загрузка CSV → OpenAI выбирает гипотезы по агрегатам → Python проверяет пилоты и план. Поддерживается автономный local режим. В production требуется Bearer-токен BeeSmart; ключ OpenAI хранится только на сервере.",
     "title": "BeeSmart API",
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "openapi": "3.1.0",
   "paths": {

@@ -17,6 +17,7 @@ from beesmart.config import Settings
 from beesmart.body_limit import BodyLimitMiddleware
 from beesmart.datasets import DatasetRepository
 from beesmart.runs import RunBusyError, RunManager
+from beesmart.llm import LLMError
 from beesmart.upload_form import MAX_UPLOAD_BYTES, upload_form
 from beesmart.uploads import UploadStore, UploadValidationError
 from beesmart.access import AccessPolicy, bearer
@@ -48,8 +49,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             lease.release()
 
-    app = FastAPI(title="BeeSmart API", version="1.2.0", lifespan=lifespan,
-                  description="Загрузка CSV, автоматическое планирование кампаний и локальная оценка. В production требуется Bearer-токен BeeSmart. Расчёты выполняет Python-агент, без LLM-вызовов.",
+    app = FastAPI(title="BeeSmart API", version="1.3.0", lifespan=lifespan,
+                  description="Загрузка CSV → OpenAI выбирает гипотезы по агрегатам → Python проверяет пилоты и план. Поддерживается автономный local режим. В production требуется Bearer-токен BeeSmart; ключ OpenAI хранится только на сервере.",
                   docs_url=None, redoc_url=None)
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.add_middleware(BodyLimitMiddleware, max_bytes=4096)
@@ -110,17 +111,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     @api.get("/api/overview", response_model=OverviewResponse, tags=["Data"])
-    def overview():
-        return repository.overview()
+    async def overview(request: Request):
+        result = await asyncio.to_thread(repository.overview)
+        result["agent"] = request.app.state.runs.intelligence.info()
+        for provider in result["providers"]:
+            if provider["id"] == "openai":
+                provider["app_spend_usd"] = result["agent"]["estimated_spend_usd"]
+                provider["runtime_calls"] = result["agent"]["paid_calls"]
+        return result
 
     @api.get("/api/agent", response_model=AgentInfo, tags=["System"])
-    def agent_info():
-        return {"engine": "local_python", "model": None, "llm_calls": False,
-                "evaluation": "organizer_mock", "paid_calls": False}
+    async def agent_info(request: Request):
+        return request.app.state.runs.intelligence.info()
 
     @api.post("/api/runs", status_code=202, response_model=RunRecord, response_model_exclude_unset=True,
               dependencies=[Depends(mutation_header)], tags=["Runs"])
     async def start_run(body: StartRunRequest, request: Request):
+        try:
+            request.app.state.runs.intelligence.check_ready()
+        except LLMError as exc:
+            raise HTTPException(503, str(exc)) from None
         overview = await asyncio.to_thread(repository.overview)
         if not overview["runtime"]["ready"]:
             raise HTTPException(409, "Для запуска нужны корректные файлы организаторов и агент")
@@ -148,6 +158,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         uploads = request.app.state.uploads
         try:
             runs.reserve_upload()
+        except LLMError as exc:
+            raise HTTPException(503, str(exc)) from None
         except RunBusyError:
             raise HTTPException(409, "Загрузка или расчёт уже идёт. Дождитесь завершения.") from None
         try:

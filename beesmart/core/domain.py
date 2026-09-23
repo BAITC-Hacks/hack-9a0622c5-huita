@@ -52,7 +52,7 @@ def historical_ranks(path: Path) -> tuple[dict, bool]:
         return {}, True
 
 
-def read_policy(path: Path) -> tuple[dict, str, str, bool]:
+def read_policy(path: Path) -> tuple[dict, str, str, bool, list]:
     baseline = {"schema_version": 1, "source": "deterministic_baseline", "alternative_targets_by_cell": {}, "rationales_by_cell": {}}
     try:
         raw = path.read_bytes()
@@ -65,10 +65,31 @@ def read_policy(path: Path) -> tuple[dict, str, str, bool]:
         if not isinstance(alternatives, dict) or not all(isinstance(k, str) and isinstance(v, list)
                 and all(isinstance(t, str) for t in v) for k, v in alternatives.items()):
             raise ValueError("Invalid policy alternatives")
-        return alternatives, hashlib.sha256(raw).hexdigest(), str(value.get("source", "frozen_policy")), False
+        priorities = value.get("priority_arms", [])
+        return alternatives, hashlib.sha256(raw).hexdigest(), str(value.get("source", "frozen_policy")), False, priorities if isinstance(priorities, list) else []
     except (OSError, ValueError, TypeError):
         raw = json.dumps(baseline, sort_keys=True).encode()
-        return {}, hashlib.sha256(raw).hexdigest(), "deterministic_baseline", True
+        return {}, hashlib.sha256(raw).hexdigest(), "deterministic_baseline", True, []
+
+
+def membership_mask(values: np.ndarray) -> int:
+    """Encode row membership in linear native-array work, not big-int sums."""
+    return int.from_bytes(np.packbits(values, bitorder="little").tobytes(), "little")
+
+
+def valid_priority_arms(values: list, cells: dict, tariffs: tuple[str, ...]) -> list[ArmKey]:
+    """Treat frozen LLM suggestions as data, with the same public constraints."""
+    valid, seen, known = [], set(), set(tariffs)
+    for value in values:
+        if not isinstance(value, (list, tuple)) or len(value) != 3 or not all(isinstance(v, str) for v in value):
+            continue
+        arm = tuple(value)
+        cell = cells.get(arm[:2])
+        if (cell is None or cell.n < 10 or arm[2] not in known or arm[2] == arm[0] or arm in seen):
+            continue
+        seen.add(arm)
+        valid.append(arm)
+    return valid
 
 
 def load_domain(env, history_path: Path, policy_path: Path) -> Domain:
@@ -91,43 +112,60 @@ def load_domain(env, history_path: Path, policy_path: Path) -> Domain:
     if not channels:
         raise ValueError("No valid public channels")
     ranks, history_fallback = historical_ranks(history_path)
-    alternatives, policy_hash, source, policy_fallback = read_policy(policy_path)
+    alternatives, policy_hash, source, policy_fallback, raw_priorities = read_policy(policy_path)
     flags = []
     if history_fallback:
         flags.append("history_fallback")
     if policy_fallback:
         flags.append("policy_fallback")
+    # Each category comparison is computed once. Optional missing values remain
+    # in the parent cell; equality filters correctly exclude them.
+    arpu_values = pd.to_numeric(profile["predicted_arpu"], errors="coerce").to_numpy(dtype=float)
+    data_membership = {value: profile["data_segment"].eq(value).fillna(False).to_numpy(dtype=bool) for value in DATA_VALUES}
+    call_membership = {value: profile["call_segment"].eq(value).fillna(False).to_numpy(dtype=bool) for value in CALL_VALUES}
+    data_masks = {value: membership_mask(selected) for value, selected in data_membership.items()}
+    call_masks = {value: membership_mask(selected) for value, selected in call_membership.items()}
     cells, segments = {}, []
-    for (current, arpu), group in profile.groupby(["current_tariff", "arpu_segment"], sort=True, observed=True):
+    groups = profile.groupby(["current_tariff", "arpu_segment"], sort=True, observed=True).indices
+    for (current, arpu), positions in groups.items():
         if current not in tariffs or arpu not in ARPU_VALUES:
             continue
-        values = pd.to_numeric(group["predicted_arpu"], errors="coerce").to_numpy(dtype=float)
+        values = arpu_values[positions]
         if not np.all(np.isfinite(values) & (values >= 0)):
             # Never silently remove a row which an actual public filter selects.
             flags.append(f"invalid_arpu_cell:{current}|{arpu}")
             continue
         key = (str(current), str(arpu))
-        cells[key] = Cell(key, len(group), float(values.sum()))
+        cells[key] = Cell(key, len(positions), float(values.sum()))
+        parent_membership = np.zeros(len(profile), dtype=bool)
+        parent_membership[positions] = True
+        parent_mask = membership_mask(parent_membership)
+        local_data = {value: selected[positions] for value, selected in data_membership.items()}
+        local_calls = {value: selected[positions] for value, selected in call_membership.items()}
         seen = set()
         for data, call in product(("",) + DATA_VALUES, ("",) + CALL_VALUES):
-            selected = group
+            mask = parent_mask
             filters = {"filter_current_tariff": key[0], "filter_arpu_segment": key[1]}
             if data:
-                selected = selected[selected["data_segment"] == data]
+                mask &= data_masks[data]
                 filters["filter_data_segment"] = data
             if call:
-                selected = selected[selected["call_segment"] == call]
+                mask &= call_masks[call]
                 filters["filter_call_segment"] = call
-            n = len(selected)
+            n = mask.bit_count()
             if not 0 < n <= 5000:
                 continue
-            mask = sum(1 << int(i) for i in selected.index)
             if mask in seen:
                 continue
             seen.add(mask)
-            sorted_arpu = np.sort(selected["predicted_arpu"].to_numpy(dtype=float))[::-1]
+            selected = np.ones(len(positions), dtype=bool)
+            if data:
+                selected &= local_data[data]
+            if call:
+                selected &= local_calls[call]
+            sorted_arpu = np.sort(values[selected])[::-1]
             prefix = np.concatenate(([0.0], np.cumsum(sorted_arpu)))
-            segments.append(Segment(key + (data, call), filters, mask, n, float(prefix[-1]), tuple(float(x) for x in prefix)))
+            segments.append(Segment(key + (data, call), filters, mask, n, float(prefix[-1]), tuple(prefix.tolist())))
     selected_targets = {}
     for key, cell in sorted(cells.items()):
         if cell.n < 10:
@@ -147,6 +185,7 @@ def load_domain(env, history_path: Path, policy_path: Path) -> Domain:
         return (-cell.arpu_sum * ranks.get((arm[0], arm[2]), (0, 0))[0], -cell.arpu_sum, *arm)
 
     primary_arms = [key + (targets[0],) for key, targets in selected_targets.items()]
+    priorities = valid_priority_arms(raw_priorities, cells, tariffs)
     queue = []
 
     def add(arm):
@@ -155,10 +194,15 @@ def load_domain(env, history_path: Path, policy_path: Path) -> Domain:
 
     for arpu in ARPU_VALUES:
         candidates = [arm for arm in primary_arms if arm[1] == arpu]
-        if candidates:
+        prioritized = next((arm for arm in priorities if arm[1] == arpu), None)
+        if prioritized is not None:
+            add(prioritized)
+        elif candidates:
             add(min(candidates, key=priority))
         else:
             flags.append(f"missing_coverage:{arpu}")
+    for arm in priorities:
+        add(arm)
     for primary in sorted(primary_arms, key=priority)[:4]:
         alternative = selected_targets[primary[:2]][1]
         if alternative:

@@ -88,6 +88,9 @@ def test_authorized_remote_access_and_http_rejection(production_settings):
         assert agent.json() == {
             "engine": "local_python", "model": None, "llm_calls": False,
             "evaluation": "organizer_mock", "paid_calls": False,
+            "provider": "local", "ready": True, "status": "disabled", "budget_usd": 5.0,
+            "estimated_spend_usd": 0.0, "reserved_usd": 0.0,
+            "request_attempts": 0, "completed_requests": 0,
         }
         assert client.get("http://api.example.test/api/overview", headers=headers).status_code == 400
         assert client.get("https://wrong.example.test/api/overview", headers=headers).status_code == 400

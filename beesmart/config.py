@@ -1,4 +1,5 @@
 import ipaddress
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +30,10 @@ class Settings:
     data_dir: Path | None = None
     forwarded_allow_ips: str = "127.0.0.1"
     log_level: str = "info"
+    agent_provider: str = "local"
+    openai_api_key: str = field(default="", repr=False)
+    openai_model: str = "gpt-6-luna"
+    llm_budget_usd: float = 5.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "root", Path(self.root).resolve())
@@ -40,6 +45,15 @@ class Settings:
             raise ValueError("BEESMART_PORT must be between 1 and 65535")
         if self.log_level not in ("critical", "error", "warning", "info", "debug"):
             raise ValueError("BEESMART_LOG_LEVEL is invalid")
+        if self.agent_provider not in ("local", "openai"):
+            raise ValueError("BEESMART_AGENT_PROVIDER must be local or openai")
+        if self.openai_model != "gpt-6-luna":
+            raise ValueError("BEESMART_OPENAI_MODEL must be gpt-6-luna (the budgeted model)")
+        if not math.isfinite(self.llm_budget_usd) or not 0 <= self.llm_budget_usd <= 50:
+            raise ValueError("BEESMART_LLM_BUDGET_USD must be between 0 and 50")
+        if self.openai_api_key and (not self.openai_api_key.isascii() or
+                any(not 33 <= ord(c) <= 126 for c in self.openai_api_key)):
+            raise ValueError("OPENAI_API_KEY contains invalid characters")
         if self.run_timeout_seconds <= 0 or self.retained_runs < 1 or self.max_events < 1:
             raise ValueError("Run timeout, retention, and event limits must be positive")
         if not self.allowed_hosts:
@@ -85,13 +99,17 @@ class Settings:
 
         base = Path(root).resolve() if root is not None else ROOT
         # Explicit process/secret-manager values take precedence over local
-        # developer configuration. Only BEESMART_* values configure this app.
+        # developer configuration. Provider credentials stay in this process.
         load_dotenv(base / ".env", override=False)
         environment = os.environ.get("BEESMART_ENVIRONMENT", "local").strip().lower()
         try:
             port = int(os.environ.get("BEESMART_PORT", "8000"))
         except ValueError:
             raise ValueError("BEESMART_PORT must be an integer") from None
+        try:
+            llm_budget = float(os.environ.get("BEESMART_LLM_BUDGET_USD", "5"))
+        except ValueError:
+            raise ValueError("BEESMART_LLM_BUDGET_USD must be a number") from None
         storage, data = os.environ.get("BEESMART_STORAGE_DIR", ""), os.environ.get("BEESMART_DATA_DIR", "")
         return cls(
             root=base,
@@ -105,6 +123,10 @@ class Settings:
             data_dir=Path(data) if data else None,
             forwarded_allow_ips=os.environ.get("BEESMART_FORWARDED_ALLOW_IPS", "127.0.0.1"),
             log_level=os.environ.get("BEESMART_LOG_LEVEL", "info").lower(),
+            agent_provider=os.environ.get("BEESMART_AGENT_PROVIDER", "local").strip().lower(),
+            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+            openai_model=os.environ.get("BEESMART_OPENAI_MODEL", "gpt-6-luna"),
+            llm_budget_usd=llm_budget,
         )
 
 

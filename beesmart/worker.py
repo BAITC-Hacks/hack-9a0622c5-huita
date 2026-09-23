@@ -15,6 +15,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("seed", type=int)
     parser.add_argument("--data-dir", type=Path, default=root)
+    parser.add_argument("--policy-path", type=Path, default=root / "frozen_policy.json")
     args = parser.parse_args()
     seed = args.seed
     # This path is supplied only by the server, never accepted from an HTTP request.
@@ -40,7 +41,7 @@ def main() -> None:
             def __init__(self):
                 self.delegate = Agent(event_sink=event_sink,
                                       history_path=dataset_root / "data" / "change_tariff.csv",
-                                      policy_path=root / "frozen_policy.json")
+                                      policy_path=args.policy_path.resolve())
                 self.campaigns = []
 
             def act(self, env):
