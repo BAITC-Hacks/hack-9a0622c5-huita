@@ -15,6 +15,8 @@ from beesmart.config import Settings
 from beesmart.body_limit import BodyLimitMiddleware
 from beesmart.datasets import DatasetRepository
 from beesmart.runs import RunBusyError, RunManager
+from beesmart.upload_form import MAX_UPLOAD_BYTES, upload_form
+from beesmart.uploads import UploadStore, UploadValidationError
 
 
 class StartRunRequest(BaseModel):
@@ -25,6 +27,7 @@ class StartRunRequest(BaseModel):
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     repository = DatasetRepository(settings)
+    uploads = UploadStore(settings.root / "work" / "datasets")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -32,7 +35,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
         await app.state.runs.close()
 
-    app = FastAPI(title="BeeSmart API", version="1.0.0", lifespan=lifespan,
+    app = FastAPI(title="BeeSmart API", version="1.1.0", lifespan=lifespan,
                   docs_url=None, redoc_url=None)
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
     app.add_middleware(BodyLimitMiddleware, max_bytes=4096)
@@ -54,8 +57,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 length = int(request.headers.get("content-length", "0"))
             except ValueError:
-                length = 1_000_000
-            if length > 4096:
+                return JSONResponse({"detail": "Некорректный Content-Length"}, status_code=400)
+            limit = MAX_UPLOAD_BYTES if request.url.path == "/api/uploads/run" else 4096
+            if length < 0 or length > limit:
                 return JSONResponse({"detail": "Слишком большой запрос"}, status_code=413)
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
@@ -85,6 +89,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return request.app.state.runs.start(body.seed)
         except RunBusyError:
             raise HTTPException(409, "Расчёт уже идёт. Дождитесь его завершения.") from None
+
+    @app.post("/api/uploads/run", status_code=202, openapi_extra={
+        "requestBody": {"required": True, "content": {"multipart/form-data": {"schema": {
+            "type": "object", "required": ["profile", "history", "tariffs"],
+            "properties": {
+                "profile": {"type": "string", "format": "binary"},
+                "history": {"type": "string", "format": "binary"},
+                "tariffs": {"type": "string", "format": "binary"},
+                "seed": {"type": "integer", "default": 42, "minimum": 0, "maximum": 4_294_967_295},
+            },
+        }}}},
+    })
+    async def upload_and_run(request: Request):
+        runs = request.app.state.runs
+        try:
+            runs.reserve_upload()
+        except RunBusyError:
+            raise HTTPException(409, "Загрузка или расчёт уже идёт. Дождитесь завершения.") from None
+        try:
+            if any(not (settings.root / name).is_file() for name in repository.RUNTIME_FILES):
+                raise HTTPException(409, "Для запуска нужны файлы среды организаторов и агент")
+            async with upload_form(request) as (files, seed):
+                saving = asyncio.create_task(asyncio.to_thread(
+                    uploads.create, {role: item.file for role, item in files.items()},
+                ))
+                try:
+                    dataset = await asyncio.shield(saving)
+                except asyncio.CancelledError:
+                    # Keep files open and reservation held until the I/O thread finishes.
+                    outcome = (await asyncio.gather(saving, return_exceptions=True))[0]
+                    if isinstance(outcome, dict):
+                        await asyncio.to_thread(uploads.discard, outcome["id"])
+                    raise
+                return runs.start(seed, dataset=dataset, from_upload=True)
+        except UploadValidationError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except OSError:
+            raise HTTPException(503, "Не удалось сохранить загруженные файлы") from None
+        finally:
+            runs.release_upload()
 
     @app.get("/api/runs/latest")
     async def latest(request: Request):

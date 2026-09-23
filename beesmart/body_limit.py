@@ -14,6 +14,10 @@ class BodyLimitMiddleware:
         if scope["type"] != "http" or scope["method"] in ("GET", "HEAD", "OPTIONS"):
             await self.app(scope, receive, send)
             return
+        if scope.get("path") == "/api/uploads/run" and scope["method"] == "POST":
+            # The upload handler counts streamed bytes before the multipart parser.
+            await self.app(scope, receive, send)
+            return
         body = bytearray()
         try:
             async with asyncio.timeout(5):
@@ -40,4 +44,3 @@ class BodyLimitMiddleware:
             return await receive()
 
         await self.app(scope, replay, send)
-

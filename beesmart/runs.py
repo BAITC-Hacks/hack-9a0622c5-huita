@@ -35,6 +35,7 @@ class RunManager:
         self._runs: OrderedDict[str, dict] = OrderedDict()
         self._active: asyncio.Task | None = None
         self._process: asyncio.subprocess.Process | None = None
+        self._upload_reserved = False
         self._load_reports()
 
     def _load_reports(self) -> None:
@@ -53,14 +54,24 @@ class RunManager:
             except (ValueError, KeyError, OSError, TypeError):
                 continue
 
-    def start(self, seed: int) -> dict:
-        if self._active is not None and not self._active.done():
+    def reserve_upload(self) -> None:
+        if self._upload_reserved or (self._active is not None and not self._active.done()):
+            raise RunBusyError
+        self._upload_reserved = True
+
+    def release_upload(self) -> None:
+        self._upload_reserved = False
+
+    def start(self, seed: int, *, dataset: dict | None = None, from_upload: bool = False) -> dict:
+        if ((self._upload_reserved and not from_upload)
+                or (self._active is not None and not self._active.done())):
             raise RunBusyError
         run_id = str(uuid4())
         record = {
             "id": run_id, "status": "queued", "seed": seed, "created_at": timestamp(),
             "finished_at": None, "duration_seconds": None, "error": None,
             "campaigns": [], "metrics": None, "events": [], "diagnostics": {},
+            "dataset": {"source": "uploaded", **dataset} if dataset else {"source": "bundled"},
         }
         self._runs[run_id] = record
         while len(self._runs) > self.settings.retained_runs:
@@ -94,8 +105,11 @@ class RunManager:
             environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT") if key in os.environ}
             environment.update(PYTHONUNBUFFERED="1", PYTHONHASHSEED="0", PYTHONDONTWRITEBYTECODE="1",
                                OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")
+            arguments = [sys.executable, "-m", "beesmart.worker", str(record["seed"])]
+            if record["dataset"]["source"] == "uploaded":
+                arguments.append(record["dataset"]["id"])
             process = await asyncio.create_subprocess_exec(
-                sys.executable, "-m", "beesmart.worker", str(record["seed"]),
+                *arguments,
                 cwd=self.settings.root, env=environment,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                 limit=1_048_576,
@@ -148,4 +162,3 @@ class RunManager:
         if self._active is not None and not self._active.done():
             self._active.cancel()
             await asyncio.gather(self._active, return_exceptions=True)
-

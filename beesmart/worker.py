@@ -1,8 +1,10 @@
 """Separate evaluation process. Only the official runner can see mock internals."""
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
+from uuid import UUID
 
 from beesmart.serialization import json_safe
 
@@ -11,6 +13,12 @@ def main() -> None:
     root = Path(__file__).resolve().parent.parent
     sys.path.insert(0, str(root))
     seed = int(sys.argv[1])
+    dataset_root = root
+    if len(sys.argv) > 2:
+        dataset_id = UUID(sys.argv[2]).hex
+        dataset_root = (root / "work" / "datasets" / dataset_id).resolve()
+        if not dataset_root.is_relative_to((root / "work" / "datasets").resolve()):
+            raise ValueError("Invalid dataset directory")
     protocol_stdout = sys.stdout
 
     def send(kind: str, data: dict) -> None:
@@ -25,10 +33,14 @@ def main() -> None:
     with contextlib.redirect_stdout(sys.stderr):
         from agent import Agent
         from local_eval import evaluate_agent
+        # Official readers use relative paths; only this isolated process changes CWD.
+        os.chdir(dataset_root)
 
         class RecordingAgent:
             def __init__(self):
-                self.delegate = Agent(event_sink=event_sink)
+                self.delegate = Agent(event_sink=event_sink,
+                                      history_path=dataset_root / "data" / "change_tariff.csv",
+                                      policy_path=root / "frozen_policy.json")
                 self.campaigns = []
 
             def act(self, env):
@@ -48,4 +60,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
